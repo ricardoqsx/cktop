@@ -1,0 +1,7 @@
+go 1.26
+
+use (
+	./apps/dtop
+	./apps/ktop
+	./libs/tui
+)
