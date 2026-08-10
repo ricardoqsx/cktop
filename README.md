@@ -15,6 +15,8 @@ El workspace y la base TUI inicial están preparados. `dtop` detecta un Docker E
 
 En Stacks, el panel del proyecto seleccionado permanece debajo de la tabla con directorio, archivos Compose y disponibilidad de acciones. `l` en el padre sigue los últimos 100 logs Compose; `l` en un hijo abre sus logs de contenedor. `s` en un hijo enfocado abre una shell local real mediante `docker exec -it <container-id> /bin/sh -l`; volver con `Ctrl+D` o `exit`. Durante esa shell, el terminal pertenece al proceso y `Esc` no vuelve a dtop. `Esc` cancela ambos streams de logs y vuelve a Stacks. `e` limita la selección múltiple de Restart/Stop a los hijos.
 
+La próxima ampliación de Stacks conservará bind mounts observados en un archivo de estado separado de `dtop.conf`, para que sigan visibles después de `docker compose down`. Todavía no está implementada.
+
 ## Desarrollo local
 
 Ejecutar `dtop`:
