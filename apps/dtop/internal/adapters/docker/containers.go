@@ -324,6 +324,112 @@ func (r *Runtime) RemoveImage(ctx context.Context, id string, force bool) error 
 	return nil
 }
 
+// PullImage delegates to the Docker CLI so registry credential helpers are reused.
+func (r *Runtime) PullImage(ctx context.Context, reference string) error {
+	apiClient, info, err := NewClient(ctx, r.options)
+	if err != nil {
+		return err
+	}
+	defer apiClient.Close()
+	if info.Remote {
+		return domain.ErrRemoteUnsupported
+	}
+
+	commandCtx, cancel := context.WithTimeout(ctx, composeTimeout)
+	defer cancel()
+	path := r.command
+	if path == "" {
+		path = "docker"
+	}
+	command := commandContext(commandCtx, path, "pull", reference)
+	var output limitedOutput
+	command.Stdout = &output
+	command.Stderr = &output
+	if err := command.Run(); err != nil {
+		if commandCtx.Err() != nil {
+			return commandCtx.Err()
+		}
+		if message := output.String(); message != "" {
+			return fmt.Errorf("docker pull %q: %w: %s", reference, err, message)
+		}
+		return fmt.Errorf("docker pull %q: %w", reference, err)
+	}
+	return nil
+}
+
+// RecreateContainer replaces a local non-Compose container with a pulled image
+// while retaining its inspected runtime configuration. A failed replacement is
+// restored from the previous image ID when possible.
+func (r *Runtime) RecreateContainer(ctx context.Context, id string, reference string) error {
+	apiClient, info, err := NewClient(ctx, r.options)
+	if err != nil {
+		return err
+	}
+	defer apiClient.Close()
+	if info.Remote {
+		return domain.ErrRemoteUnsupported
+	}
+
+	inspect, err := apiClient.api.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
+	if err != nil {
+		return fmt.Errorf("inspect %s for recreate: %w", shortID(id), err)
+	}
+	if inspect.Container.Config == nil || inspect.Container.HostConfig == nil {
+		return fmt.Errorf("inspect %s for recreate: incomplete container configuration", shortID(id))
+	}
+	if inspect.Container.Config.Labels["com.docker.compose.project"] != "" {
+		return fmt.Errorf("recreate %s: Docker Compose containers must be recreated through their stack", shortID(id))
+	}
+
+	running := inspect.Container.State != nil && inspect.Container.State.Running
+	if running {
+		if _, err := apiClient.api.ContainerStop(ctx, id, client.ContainerStopOptions{}); err != nil {
+			return fmt.Errorf("stop %s for recreate: %w", shortID(id), err)
+		}
+	}
+	if _, err := apiClient.api.ContainerRemove(ctx, id, client.ContainerRemoveOptions{Force: false}); err != nil {
+		return fmt.Errorf("remove %s for recreate: %w", shortID(id), err)
+	}
+
+	name := strings.TrimPrefix(inspect.Container.Name, "/")
+	if err := recreateInspectedContainer(ctx, apiClient, inspect, name, reference, running); err != nil {
+		restoreErr := recreateInspectedContainer(ctx, apiClient, inspect, name, inspect.Container.Image, running)
+		if restoreErr != nil {
+			return fmt.Errorf("recreate %s with %q: %w; restore with previous image failed: %v", shortID(id), reference, err, restoreErr)
+		}
+		return fmt.Errorf("recreate %s with %q: %w; previous container restored", shortID(id), reference, err)
+	}
+	return nil
+}
+
+func recreateInspectedContainer(ctx context.Context, apiClient *Client, inspect client.ContainerInspectResult, name, reference string, start bool) error {
+	config := *inspect.Container.Config
+	config.Image = reference
+	hostConfig := *inspect.Container.HostConfig
+	networking := &mobynetwork.NetworkingConfig{}
+	if inspect.Container.NetworkSettings != nil {
+		networking.EndpointsConfig = make(map[string]*mobynetwork.EndpointSettings, len(inspect.Container.NetworkSettings.Networks))
+		for networkName, endpoint := range inspect.Container.NetworkSettings.Networks {
+			endpointCopy := *endpoint
+			networking.EndpointsConfig[networkName] = &endpointCopy
+		}
+	}
+	created, err := apiClient.api.ContainerCreate(ctx, client.ContainerCreateOptions{Config: &config, HostConfig: &hostConfig, NetworkingConfig: networking, Name: name})
+	if err != nil {
+		return err
+	}
+	if !start {
+		return nil
+	}
+	if _, err := apiClient.api.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
+		if _, removeErr := apiClient.api.ContainerRemove(ctx, created.ID, client.ContainerRemoveOptions{Force: true}); removeErr != nil {
+			return fmt.Errorf("start replacement: %w; remove failed replacement: %v", err, removeErr)
+		}
+		return fmt.Errorf("start replacement: %w", err)
+	}
+	return nil
+}
+
 func (r *Runtime) RemoveNetwork(ctx context.Context, id string) error {
 	apiClient, _, err := NewClient(ctx, r.options)
 	if err != nil {
@@ -387,8 +493,11 @@ func (r *Runtime) loadMetrics(ctx context.Context, c *Client, containers []domai
 			}
 
 			container := containers[index]
-			if startedAt, err := c.containerStartedAt(ctx, container.ID); err == nil {
+			if startedAt, configuredImage, err := c.containerRuntimeMetadata(ctx, container.ID); err == nil {
 				container.StartedAt = startedAt
+				if configuredImage != "" {
+					container.Image = configuredImage
+				}
 			}
 			stats, err := c.containerStats(ctx, container.ID)
 			if err == nil {
@@ -400,21 +509,25 @@ func (r *Runtime) loadMetrics(ctx context.Context, c *Client, containers []domai
 	wait.Wait()
 }
 
-func (c *Client) containerStartedAt(ctx context.Context, id string) (time.Time, error) {
+func (c *Client) containerRuntimeMetadata(ctx context.Context, id string) (time.Time, string, error) {
 	result, err := c.api.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, "", err
+	}
+	configuredImage := ""
+	if result.Container.Config != nil {
+		configuredImage = result.Container.Config.Image
 	}
 	if result.Container.State == nil || result.Container.State.StartedAt == "" {
-		return time.Time{}, nil
+		return time.Time{}, configuredImage, nil
 	}
 
 	startedAt, err := parseStartedAt(result.Container.State.StartedAt)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("parse started time for %s: %w", shortID(id), err)
+		return time.Time{}, configuredImage, fmt.Errorf("parse started time for %s: %w", shortID(id), err)
 	}
 
-	return startedAt, nil
+	return startedAt, configuredImage, nil
 }
 
 func parseStartedAt(value string) (time.Time, error) {
@@ -520,6 +633,7 @@ func toDomainContainer(summary mobycontainer.Summary) domain.Container {
 		ShortID:            shortID(summary.ID),
 		Name:               containerName(summary),
 		Image:              summary.Image,
+		ImageID:            summary.ImageID,
 		State:              string(summary.State),
 		Status:             summary.Status,
 		Health:             containerHealth(summary),
@@ -539,15 +653,16 @@ func toDomainImage(summary mobyimage.Summary) domain.Image {
 		name = tags[0]
 	}
 	return domain.Image{
-		ID:         summary.ID,
-		ShortID:    shortID(strings.TrimPrefix(summary.ID, "sha256:")),
-		Name:       name,
-		Tags:       tags,
-		Size:       nonNegativeSize(summary.Size),
-		Created:    time.Unix(summary.Created, 0),
-		Containers: summary.Containers,
-		UsageKnown: summary.Containers >= 0,
-		Dangling:   len(tags) == 0,
+		ID:          summary.ID,
+		ShortID:     shortID(strings.TrimPrefix(summary.ID, "sha256:")),
+		Name:        name,
+		Tags:        tags,
+		Size:        nonNegativeSize(summary.Size),
+		Created:     time.Unix(summary.Created, 0),
+		Containers:  summary.Containers,
+		UsageKnown:  summary.Containers >= 0,
+		Dangling:    len(tags) == 0,
+		RepoDigests: append([]string(nil), summary.RepoDigests...),
 	}
 }
 

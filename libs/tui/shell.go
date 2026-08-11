@@ -27,24 +27,29 @@ type View struct {
 
 // ShellOptions configures the neutral TUI shell without domain-specific data.
 type ShellOptions struct {
-	Title      string
-	Subtitle   string
-	Views      []View
-	ActiveView int
-	Footer     string
+	Title       string
+	Subtitle    string
+	Views       []View
+	ActiveView  int
+	Footer      string
+	AccentColor string
+	Banner      string
+	BannerColor string
 }
 
 type shellModel struct {
-	title    string
-	subtitle string
-	views    []View
-	active   int
-	showHelp bool
-	bindings keyMap
-	width    int
-	height   int
-	theme    theme
-	footer   string
+	title       string
+	subtitle    string
+	views       []View
+	active      int
+	showHelp    bool
+	bindings    keyMap
+	width       int
+	height      int
+	theme       theme
+	footer      string
+	banner      string
+	bannerColor string
 }
 
 type keyMap struct {
@@ -85,14 +90,22 @@ func newShell(options ShellOptions) shellModel {
 		active = 0
 	}
 
+	theme := defaultTheme()
+	if options.AccentColor != "" {
+		theme.appTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(options.AccentColor))
+		theme.activeTab = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color(options.AccentColor)).Padding(0, 1)
+	}
+
 	return shellModel{
-		title:    fallback(options.Title, "cktop"),
-		subtitle: options.Subtitle,
-		views:    views,
-		active:   active,
-		bindings: defaultKeys(),
-		theme:    defaultTheme(),
-		footer:   options.Footer,
+		title:       fallback(options.Title, "cktop"),
+		subtitle:    options.Subtitle,
+		views:       views,
+		active:      active,
+		bindings:    defaultKeys(),
+		theme:       theme,
+		footer:      options.Footer,
+		banner:      options.Banner,
+		bannerColor: fallback(options.BannerColor, "33"),
 	}
 }
 
@@ -134,26 +147,24 @@ func (m shellModel) View() string {
 		return m.renderDense(layout)
 	}
 
-	body := strings.Join([]string{
-		m.renderHeader(layout.ContentWidth),
-		m.renderTabs(layout),
-		m.renderContent(),
-		m.renderFooter(layout),
-	}, "\n\n")
+	parts := []string{m.renderHeader(layout.ContentWidth), m.renderTabs(layout), m.renderContent(), m.renderFooter(layout)}
+	body := strings.Join(parts, "\n\n")
 	body = fitBlock(body, layout.ContentWidth)
 
 	return m.theme.panel.Width(layout.ContentWidth + 4).Render(body)
 }
 
 func (m shellModel) renderDense(layout Layout) string {
-	parts := []string{
-		m.renderHeader(layout.ContentWidth),
-		m.renderTabs(layout),
-		m.renderContentDense(layout),
-		m.renderFooter(layout),
-	}
+	parts := []string{m.renderHeader(layout.ContentWidth), m.renderTabs(layout), m.renderContentDense(layout), m.renderFooter(layout)}
 
 	return fitBlock(strings.Join(parts, "\n"), layout.ContentWidth)
+}
+
+func (m shellModel) renderBanner(layout Layout) string {
+	if m.banner == "" {
+		return ""
+	}
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color(m.bannerColor)).Width(layout.ContentWidth).Render(fitBlock(m.banner, layout.ContentWidth))
 }
 
 func (m shellModel) renderHeader(width int) string {
@@ -266,7 +277,12 @@ func (m shellModel) renderFooter(layout Layout) string {
 		footer = "tab next  q quit"
 	}
 
-	return ansi.Truncate(m.theme.help.Render(footer), layout.ContentWidth, "...")
+	parts := make([]string, 0, 2)
+	if banner := m.renderBanner(layout); banner != "" {
+		parts = append(parts, banner)
+	}
+	parts = append(parts, ansi.Truncate(m.theme.help.Render(footer), layout.ContentWidth, "..."))
+	return strings.Join(parts, "\n")
 }
 
 func (m shellModel) activeView() View {

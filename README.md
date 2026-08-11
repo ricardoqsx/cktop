@@ -11,9 +11,9 @@ El objetivo no es reemplazar Docker CLI, `kubectl` o herramientas de administrac
 
 ## Estado
 
-El workspace y la base TUI inicial están preparados. `dtop` detecta un Docker Engine local y ofrece vistas responsive de Containers, Stacks, Images, Networks y Volumes. Stacks descubre proyectos Compose etiquetados sin requerir registro, agrega CPU y memoria de sus contenedores running y permite `Up`, `Stop`, `Restart` y `Down` locales cuando el estado y los metadatos explícitos lo permiten. Las mutaciones requieren confirmación `Are you sure? [y/N]`; Down no elimina volúmenes. Si faltan metadatos Compose, el stack sigue siendo observable pero no expone acciones. En D2, Images, Networks y Volumes admiten selección múltiple y eliminación secuencial no forzada con confirmación explícita. Docker rechaza redes conectadas y volúmenes referenciados; eliminar un volumen puede borrar datos persistentes. Sus referencias se calculan desde los contenedores listados. Posteriormente se añadirá un único host LAN o remoto mediante SSH o TLS.
+El workspace y la base TUI inicial están preparados. `dtop` detecta un Docker Engine local y ofrece vistas responsive de Containers, Stacks, Images, Networks y Volumes. Las filas enfocadas se resaltan a ancho completo y los colores de acento/foco son configurables por aplicación. Las mutaciones muestran una confirmación contextual sin ocultar la tabla y usan `y/N`; Pull de imágenes se ejecuta directamente porque no recrea ni reinicia contenedores. Tras ejecutar, la tabla vuelve a estar activa, la selección se limpia y un resultado temporal informa éxito parcial o total. Down no elimina volúmenes. Si faltan metadatos Compose, el stack sigue siendo observable pero no expone acciones. En D2, Images, Networks y Volumes admiten selección múltiple y eliminación secuencial no forzada. Docker rechaza redes conectadas y volúmenes referenciados; eliminar un volumen puede borrar datos persistentes. Sus referencias se calculan desde los contenedores listados. Posteriormente se añadirá un único host LAN o remoto mediante SSH o TLS.
 
-En Stacks, el panel del proyecto seleccionado permanece debajo de la tabla con directorio, archivos Compose y disponibilidad de acciones. `l` en el padre sigue los últimos 100 logs Compose; `l` en un hijo abre sus logs de contenedor. `s` en un hijo enfocado abre una shell local real mediante `docker exec -it <container-id> /bin/sh -l`; volver con `Ctrl+D` o `exit`. Durante esa shell, el terminal pertenece al proceso y `Esc` no vuelve a dtop. `Esc` cancela ambos streams de logs y vuelve a Stacks. `e` limita la selección múltiple de Restart/Stop a los hijos.
+En Stacks, el panel del proyecto seleccionado permanece debajo de la tabla con directorio, archivos Compose y disponibilidad de acciones. `l` en el padre sigue los últimos 100 logs Compose; `l` en un hijo abre sus logs de contenedor. `s` en un hijo enfocado abre una shell local real mediante `docker exec -it <container-id> /bin/sh -l`; volver con `Ctrl+D` o `exit`. Durante esa shell, el terminal pertenece al proceso y `Esc` no vuelve a dtop. `Esc` cancela ambos streams de logs y vuelve a Stacks. `e` limita la selección múltiple de Restart/Stop a los hijos. Containers se actualiza cada dos segundos; Images, Networks y Volumes se reconcilian en segundo plano cada cinco segundos. Si falla una fuente individual, su pestaña conserva los últimos datos conocidos y los marca como parciales.
 
 La próxima ampliación de Stacks conservará bind mounts observados en un archivo de estado separado de `dtop.conf`, para que sigan visibles después de `docker compose down`. Todavía no está implementada.
 
@@ -80,9 +80,20 @@ Los binarios generados por `go build` quedan en la raíz si no se indica una rut
 ```ini
 [display]
 memory_mode = both
+accent_color = 63
+focus_color = 15
+
+[updates]
+enabled = true
+scope = running
+interval = 15m
+concurrency = 4
 ```
 
 Valores disponibles: `usage`, `percent` y `both`.
+`accent_color` y `focus_color` aceptan valores ANSI/256 de `0` a `255`; sus defaults son `63` y `15`. El acento es el fondo del foco en tablas y menús, mientras `focus_color` define el texto resaltado.
+
+La detección de actualizaciones consulta cada referencia única usada por contenedores `running` mediante Docker CLI, reutilizando sus credenciales y credential helpers. Prefiere `docker buildx imagetools inspect` para obtener el digest del índice y usa `docker manifest inspect --verbose` como fallback verificable. Compara el digest remoto con los `RepoDigests` locales; `U` indica una actualización, `R` una imagen descargada pendiente de recrear sus contenedores, `=` actual, `P` una referencia fijada por digest, `?` una comparación no verificable y `...` una consulta activa. No filtra `latest`: una etiqueta versionada también se consulta. Enter abre las acciones de la imagen: `Pull update` está disponible para `U` y se ejecuta directamente con la referencia exacta usada por el contenedor; `Recreate containers` está disponible para `R` usado por contenedores directos locales y conserva su configuración inspectada. `Delete` está disponible siempre. Con `e` y espacio, las acciones se aplican a la selección. Pull no reinicia ni recrea contenedores; la recreación se confirma por separado. Si Docker Hub no tiene una credencial configurada, Help muestra el recordatorio persistente `docker login` hasta detectarla. Los contenedores Compose se actualizarán mediante su Stack registrado en una siguiente entrega.
 
 Para registrar opcionalmente un proyecto Compose local:
 
@@ -119,6 +130,11 @@ libs/tui     base visual compartida
 ## Documentación
 
 La planificación, arquitectura y visiones de producto viven localmente en `.proyects/`. Esa carpeta no forma parte del repositorio público.
+
+- [Guia de usuario de dtop](.proyects/userguide.md): uso diario, vistas, acciones, updates y configuracion.
+- [Documentacion tecnica de dtop](.proyects/documentacion.md): mapa del codigo, flujos y guia de mantenimiento.
+- [Plan](.proyects/PLAN.md): estado de hitos y siguientes entregas.
+- [Arquitectura](.proyects/ARCHITECTURE.md) y [decisiones](.proyects/DECISIONS.md): limites y reglas duraderas.
 
 ## Licencia
 

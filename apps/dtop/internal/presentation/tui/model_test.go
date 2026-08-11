@@ -9,7 +9,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/application"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/config"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/domain"
@@ -169,16 +171,15 @@ func TestInitSchedulesAggregateResourcesAndLoadsUnopenedTabs(t *testing.T) {
 	}
 
 	updated, _ := model.Update(resourcesLoadedMsg{resources: ports.ResourceLoad{
-		Stacks:   []domain.Stack{{Name: "stack"}},
 		Images:   []domain.Image{{ID: "image", Name: "image:latest"}},
 		Networks: []domain.Network{{ID: "network", Name: "network"}},
 		Volumes:  []domain.Volume{{Name: "volume"}},
 	}})
 	loaded := updated.(Model)
-	if !loaded.stacksLoaded || !loaded.imagesLoaded || !loaded.networksLoaded || !loaded.volumesLoaded {
+	if !loaded.imagesLoaded || !loaded.networksLoaded || !loaded.volumesLoaded {
 		t.Fatalf("expected all resource tabs loaded, got %#v", loaded)
 	}
-	if loaded.selectedStackName != "stack" || loaded.selectedImageID != "image" || loaded.selectedNetworkID != "network" || loaded.selectedVolumeName != "volume" {
+	if loaded.selectedImageID != "image" || loaded.selectedNetworkID != "network" || loaded.selectedVolumeName != "volume" {
 		t.Fatalf("expected selections for unopened tabs, got %#v", loaded)
 	}
 }
@@ -213,6 +214,77 @@ func TestAggregateResourcesKeepsPartialErrorsIndependent(t *testing.T) {
 	}
 }
 
+func TestResourceReconciliationRemovesDeletedResourcesAndKeepsValidSelections(t *testing.T) {
+	model := NewModel(application.NewContainerService(fakeRuntime{}), config.MemoryBoth)
+	model.selectedImageID, model.selectedNetworkID, model.selectedVolumeName = "image-gone", "network-live", "volume-gone"
+	model.selectedImages["image-gone"] = struct{}{}
+	model.selectedNetworks["network-live"] = struct{}{}
+	model.selectedVolumes["volume-gone"] = struct{}{}
+	model.imageDetailOpen = true
+
+	updated, _ := model.Update(resourcesLoadedMsg{resources: ports.ResourceLoad{
+		Images:   []domain.Image{{ID: "image-live", Containers: 1, UsageKnown: true}, {ID: "image-gone", Containers: 1, UsageKnown: true}},
+		Networks: []domain.Network{{ID: "network-live", Containers: 1, UsageKnown: true}, {ID: "network-gone", Containers: 1, UsageKnown: true}},
+		Volumes:  []domain.Volume{{Name: "volume-live", Containers: 1, UsageKnown: true}, {Name: "volume-gone", Containers: 1, UsageKnown: true}},
+	}})
+	loaded := updated.(Model)
+	updated, _ = loaded.Update(resourcesLoadedMsg{resources: ports.ResourceLoad{
+		Images:   []domain.Image{{ID: "image-live", Containers: 0, UsageKnown: true}},
+		Networks: []domain.Network{{ID: "network-live", Containers: 0, UsageKnown: true}},
+		Volumes:  []domain.Volume{{Name: "volume-live", Containers: 0, UsageKnown: true}},
+	}})
+	reconciled := updated.(Model)
+	if len(reconciled.images) != 1 || len(reconciled.networks) != 1 || len(reconciled.volumes) != 1 || reconciled.images[0].Containers != 0 || reconciled.networks[0].Containers != 0 || reconciled.volumes[0].Containers != 0 {
+		t.Fatalf("expected deleted resources removed and usage recalculated, got images=%#v networks=%#v volumes=%#v", reconciled.images, reconciled.networks, reconciled.volumes)
+	}
+	if reconciled.selectedImageID != "image-live" || reconciled.selectedNetworkID != "network-live" || reconciled.selectedVolumeName != "volume-live" || reconciled.imageDetailOpen {
+		t.Fatalf("expected only live selections and no stale detail panel, got %#v", reconciled)
+	}
+	if len(reconciled.selectedImages) != 0 || len(reconciled.selectedNetworks) != 1 || len(reconciled.selectedVolumes) != 0 {
+		t.Fatalf("expected removed multi-selections cleared, got images=%v networks=%v volumes=%v", reconciled.selectedImages, reconciled.selectedNetworks, reconciled.selectedVolumes)
+	}
+}
+
+func TestResourceRefreshDoesNotOverlap(t *testing.T) {
+	model := NewModel(application.NewContainerService(fakeRuntime{}), config.MemoryBoth)
+	updated, _ := model.Update(resourcesLoadedMsg{generation: model.resourcesGen})
+	ready := updated.(Model)
+	updated, command := ready.Update(resourceRefreshMsg(time.Now()))
+	loading := updated.(Model)
+	if command == nil || !loading.resourcesLoading || loading.resourcesGen != ready.resourcesGen+1 {
+		t.Fatalf("expected one aggregate reconciliation command, got %#v", loading)
+	}
+	updated, second := loading.Update(resourceRefreshMsg(time.Now()))
+	if second != nil || updated.(Model).resourcesGen != loading.resourcesGen {
+		t.Fatal("resource reconciliation must not overlap")
+	}
+}
+
+func TestManualResourceLoadWinsOverStaleAggregateResult(t *testing.T) {
+	model := NewModel(application.NewContainerService(fakeRuntime{}), config.MemoryBoth)
+	model.active = 2
+	updated, _ := model.Update(resourcesLoadedMsg{generation: model.resourcesGen, imagesGen: model.imagesGen, networksGen: model.networksGen, volumesGen: model.volumesGen, resources: ports.ResourceLoad{Images: []domain.Image{{ID: "current"}}}})
+	loaded := updated.(Model)
+	updated, _ = loaded.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	manual := updated.(Model)
+	if manual.imagesGen == loaded.imagesGen {
+		t.Fatal("expected manual image refresh generation")
+	}
+	updated, _ = manual.Update(resourcesLoadedMsg{generation: manual.resourcesGen, imagesGen: loaded.imagesGen, networksGen: loaded.networksGen, volumesGen: loaded.volumesGen, resources: ports.ResourceLoad{Images: []domain.Image{{ID: "stale"}}}})
+	if got := updated.(Model).images[0].ID; got != "current" {
+		t.Fatalf("stale aggregate replaced manual image state with %q", got)
+	}
+}
+
+func TestPartialResourceFailureKeepsLastKnownRows(t *testing.T) {
+	model := loadedImageSelectionModel(t)
+	updated, _ := model.Update(resourcesLoadedMsg{imagesGen: model.imagesGen, resources: ports.ResourceLoad{ImagesErr: errors.New("images unavailable")}})
+	failed := updated.(Model)
+	if len(failed.images) != 2 || failed.imagesErr == nil || !strings.Contains(failed.imagesView(sharedui.ResolveLayout(100, 20)).Summary, "Showing last known") {
+		t.Fatalf("expected visible partial image state, got %#v", failed)
+	}
+}
+
 func TestResourceUsageShowsUnknown(t *testing.T) {
 	if got := resourceUsage(0, false); got != "unknown" {
 		t.Fatalf("expected unknown usage, got %q", got)
@@ -231,6 +303,132 @@ func TestRenderImagesShowsUsageAndFitsLayout(t *testing.T) {
 		if got := ansi.StringWidth(line); got > layout.ContentWidth {
 			t.Fatalf("rendered image line width %d, got %q", got, line)
 		}
+	}
+}
+
+func TestImageUpdateColumnShowsAllReadOnlyStatuses(t *testing.T) {
+	layout := sharedui.ResolveLayout(100, 20)
+	images := []domain.Image{{ID: "available", Name: "available:1", Update: domain.UpdateAvailable}, {ID: "current", Name: "current:1", Update: domain.UpdateCurrent}, {ID: "pinned", Name: "pinned:1", Update: domain.UpdatePinned}, {ID: "checking", Name: "checking:1", Update: domain.UpdateChecking}, {ID: "unknown", Name: "unknown:1", Update: domain.UpdateUnknown}, {ID: "recreate", Name: "recreate:1", Update: domain.UpdatePulledPendingRecreate}}
+	view := renderImages(images, "available", nil, false, layout, time.Now())
+	if !strings.Contains(view, "UPDATE") {
+		t.Fatalf("missing update header: %q", view)
+	}
+	for _, indicator := range []string{"U", "=", "P", "...", "?", "R"} {
+		if !strings.Contains(view, indicator) {
+			t.Fatalf("missing update indicator %q in %q", indicator, view)
+		}
+	}
+}
+
+func TestCancelImageUpdateScanAllowsRescanAfterCompletedScan(t *testing.T) {
+	model := Model{updatesStarted: true}
+
+	model.cancelImageUpdateScan()
+
+	if model.updatesStarted {
+		t.Fatal("completed scan must be invalidated when running image references change")
+	}
+	if model.updatesRunning || model.updatesCancel != nil {
+		t.Fatalf("scan state was not cleared: %#v", model)
+	}
+	if model.updatesGeneration != 1 {
+		t.Fatalf("generation = %d, want 1", model.updatesGeneration)
+	}
+}
+
+func TestReconcileImagesPreservesUpdateStatusWhenDigestsAreUnchanged(t *testing.T) {
+	model := Model{images: []domain.Image{{ID: "sha256:image", RepoDigests: []string{"example.com/app@sha256:local"}, Update: domain.UpdateAvailable}}}
+
+	model.reconcileImages([]domain.Image{{ID: "sha256:image", RepoDigests: []string{"example.com/app@sha256:local"}}}, nil)
+
+	if got := model.images[0].Update; got != domain.UpdateAvailable {
+		t.Fatalf("update status = %q, want %q", got, domain.UpdateAvailable)
+	}
+}
+
+func TestCompletedScanNeverLeavesCheckedImageInChecking(t *testing.T) {
+	model := loadedImageSelectionModel(t)
+	model.updates = testImageUpdateService()
+	model.loading = false
+	model.resourcesLoading = false
+	model.images[0].Update = domain.UpdateChecking
+	model.updatesGeneration = 2
+	model.updatesRunning = true
+	model.updatesChecking = map[string]domain.UpdateStatus{"one": domain.UpdateAvailable}
+
+	updated, _ := model.Update(imageUpdatesLoadedMsg{generation: 2})
+	if got := updated.(Model).images[0].Update; got != domain.UpdateUnknown {
+		t.Fatalf("empty terminal scan left status %q, want unknown", got)
+	}
+}
+
+func TestCancelScanRestoresStatusInsteadOfLeavingChecking(t *testing.T) {
+	model := loadedImageSelectionModel(t)
+	model.images[0].Update = domain.UpdateChecking
+	model.updatesChecking = map[string]domain.UpdateStatus{"one": domain.UpdateAvailable}
+	model.updatesRunning = true
+
+	model.cancelImageUpdateScan()
+	if got := model.images[0].Update; got != domain.UpdateAvailable {
+		t.Fatalf("cancel restored %q, want available", got)
+	}
+}
+
+func TestPendingRecreateSurvivesReconcileAndLateScan(t *testing.T) {
+	model := loadedImageSelectionModel(t)
+	model.images[0].RepoDigests = []string{"one@sha256:old"}
+	model.pendingRecreates["container"] = pendingImageRecreate{ContainerID: "container", ImageID: "one", Reference: "one:latest"}
+	model.applyPendingImageStatuses()
+
+	model.reconcileImages([]domain.Image{{ID: "one", Name: "one:old", RepoDigests: []string{"one@sha256:old"}}, {ID: "new", Name: "one:latest", RepoDigests: []string{"one@sha256:new"}}}, nil)
+	model.updatesGeneration = 3
+	updated, _ := model.Update(imageUpdatesLoadedMsg{generation: 3, updates: []domain.ImageUpdate{{ImageID: "one", Status: domain.UpdateAvailable}}})
+	if got := updated.(Model).images[0].Update; got != domain.UpdatePulledPendingRecreate {
+		t.Fatalf("late scan replaced pending recreate with %q", got)
+	}
+}
+
+func TestScanResultReconstructsPendingRecreateAfterRestart(t *testing.T) {
+	model := loadedImageSelectionModel(t)
+	model.updates = testImageUpdateService()
+	model.snapshot.Containers = []domain.Container{{ID: "container", Image: "one:latest", ImageID: "sha256:one", State: "running"}}
+	model.updatesGeneration = 4
+
+	updated, _ := model.Update(imageUpdatesLoadedMsg{generation: 4, updates: []domain.ImageUpdate{{ImageID: "one", Status: domain.UpdatePulledPendingRecreate}}})
+	got := updated.(Model)
+	if got.images[0].Update != domain.UpdatePulledPendingRecreate {
+		t.Fatalf("scan status = %q, want pending recreate", got.images[0].Update)
+	}
+	if pending, found := got.pendingRecreates["container"]; !found || pending.Reference != "one:latest" {
+		t.Fatalf("scan did not reconstruct pending state: %#v", got.pendingRecreates)
+	}
+}
+
+func TestSuccessfulPullTransitionsAvailableImageToPendingRecreate(t *testing.T) {
+	model := loadedImageSelectionModel(t)
+	model.updates = testImageUpdateService()
+	model.loading = false
+	model.resourcesLoading = false
+	model.images[0].Update = domain.UpdateAvailable
+	model.snapshot.Containers = []domain.Container{{ID: "container", Image: "one:latest", ImageID: "sha256:one", State: "running"}}
+	targets := model.selectedImageTargetsForIDs([]string{"one"})
+
+	model.markPulledImages(targets, []application.ActionResult{{ID: "one:latest", Action: application.ActionPull}})
+	if got := model.images[0].Update; got != domain.UpdatePulledPendingRecreate {
+		t.Fatalf("successful pull status = %q, want pending recreate", got)
+	}
+	if pending, found := model.pendingRecreates["container"]; !found || pending.Reference != "one:latest" || pending.ImageID != "sha256:one" {
+		t.Fatalf("missing durable pending recreate: %#v", model.pendingRecreates)
+	}
+
+	model.snapshot.Containers[0].Image = "sha256:one"
+	model.updatesStarted = false
+	command := model.startImageUpdateScan()
+	if command == nil {
+		t.Fatal("expected terminal scan command")
+	}
+	if got := model.images[0].Update; got != domain.UpdatePulledPendingRecreate {
+		t.Fatalf("scan replaced pending status with %q", got)
 	}
 }
 
@@ -345,7 +543,7 @@ func TestEditingSelectsMultipleContainersAndOpensMenu(t *testing.T) {
 	}
 }
 
-func TestDeleteConfirmationRequiresExactText(t *testing.T) {
+func TestDeleteConfirmationUsesY(t *testing.T) {
 	model := loadedSelectionModel(t)
 	model.action = actionState{
 		stage:   actionConfirm,
@@ -355,13 +553,12 @@ func TestDeleteConfirmationRequiresExactText(t *testing.T) {
 
 	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if command != nil || updated.(Model).action.running {
-		t.Fatal("delete should not run without confirmation text")
+		t.Fatal("enter must not confirm deletion")
 	}
 
-	updated, _ = updated.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("delete")})
-	confirmed, command := updated.(Model).Update(tea.KeyMsg{Type: tea.KeyEnter})
+	confirmed, command := updated.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if command == nil || !confirmed.(Model).action.running {
-		t.Fatal("expected force delete command after typing delete")
+		t.Fatal("y must confirm deletion")
 	}
 }
 
@@ -376,8 +573,144 @@ func TestActionResultClearsSelection(t *testing.T) {
 	if command == nil {
 		t.Fatal("expected refresh after action")
 	}
-	if result.action.stage != actionResult || result.editing || len(result.selected) != 0 {
-		t.Fatalf("expected cleared selection and result stage, got %#v", result)
+	if result.action.stage != actionNone || result.editing || len(result.selected) != 0 || result.notice == "" {
+		t.Fatalf("expected cleared selection and timed result notice, got %#v", result)
+	}
+}
+
+func TestFocusedRowsAndActionMenuUseFullWidthANSIHighlights(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(termenv.Ascii) })
+	layout := sharedui.ResolveLayout(80, 20)
+	row := renderContainersWithColors([]domain.Container{{ID: "one", Name: "one", State: "running"}}, "one", nil, false, time.Now(), layout, config.MemoryBoth, "63", "15")
+	lines := strings.Split(row, "\n")
+	if !strings.Contains(lines[2], "\x1b[") || ansi.StringWidth(lines[2]) != tableWidth(containerColumns(layout.ContentWidth, config.MemoryBoth, false)) {
+		t.Fatalf("expected full-width focused row, got %q", lines[2])
+	}
+	model := loadedSelectionModel(t)
+	model.width, model.height = 80, 20
+	model.action = actionState{stage: actionMenu, targets: []actionTarget{{ID: "one", Name: "one"}}}
+	menu := model.actionMenuView().Sections[1].Body
+	if !strings.Contains(menu, "\x1b[") || ansi.StringWidth(strings.Split(menu, "\n")[0]) != sharedui.ResolveLayout(80, 20).ContentWidth {
+		t.Fatalf("expected full-width active menu row, got %q", menu)
+	}
+}
+
+func TestConfirmationPersistsAndYNAreRequired(t *testing.T) {
+	model := loadedSelectionModel(t)
+	model.action = actionState{stage: actionMenu, targets: []actionTarget{{ID: "one", Name: "one"}}}
+	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	confirmation := updated.(Model)
+	if command != nil || confirmation.action.stage != actionConfirm || confirmation.confirmationBanner() == "" {
+		t.Fatalf("expected persistent confirmation, got %#v", confirmation)
+	}
+	updated, command = confirmation.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command != nil || updated.(Model).action.running {
+		t.Fatal("enter must not confirm a normal action")
+	}
+	updated, command = confirmation.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if command == nil || !updated.(Model).action.running {
+		t.Fatal("y must confirm a normal action")
+	}
+	updated, _ = confirmation.Update(actionNoticeExpiredMsg{generation: confirmation.noticeGeneration})
+	if updated.(Model).action.stage != actionConfirm {
+		t.Fatal("confirmation must not expire")
+	}
+}
+
+func TestConfirmationBannerHighlightsEveryActionAndKeepsControlsVisible(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(termenv.Ascii) })
+	for _, resource := range []actionResource{actionContainers, actionImages, actionNetworks, actionVolumes, actionStacks, actionStackContainers} {
+		model := loadedSelectionModel(t)
+		model.width, model.height = 48, 20
+		model.action = actionState{stage: actionConfirm, resource: resource, targets: []actionTarget{{ID: "one", Name: "very-long-target-name-for-confirmation"}}}
+		if resource == actionImages {
+			model.action.choices = []application.Action{application.ActionPull}
+		}
+		banner := model.confirmationBanner()
+		if !strings.Contains(banner, "CONFIRM:") || !strings.Contains(banner, "esc cancel") {
+			t.Fatalf("resource %d banner missing confirmation controls: %q", resource, banner)
+		}
+		view := model.View()
+		if !strings.Contains(view, "CONFIRM:") || !strings.Contains(view, "\x1b[") {
+			t.Fatalf("resource %d confirmation was not visibly highlighted: %q", resource, view)
+		}
+	}
+}
+
+func TestConfirmationBannerIsHiddenOutsideConfirmation(t *testing.T) {
+	model := loadedSelectionModel(t)
+	model.action = actionState{stage: actionMenu, targets: []actionTarget{{ID: "one", Name: "one"}}}
+	if banner := model.confirmationBanner(); banner != "" {
+		t.Fatalf("unexpected banner outside confirmation: %q", banner)
+	}
+}
+
+func TestHelpShowsDockerHubLoginGuidanceUntilConfigured(t *testing.T) {
+	model := loadedSelectionModel(t)
+	model.showHelp = true
+	model.dockerHubLoginChecked = true
+	help := model.containersView(sharedui.ResolveLayout(100, 30))
+	if !strings.Contains(help.Sections[len(help.Sections)-1].Body, "log in to Docker Hub") {
+		t.Fatalf("missing Docker Hub login guidance: %#v", help.Sections)
+	}
+
+	model.dockerHubLoginConfigured = true
+	help = model.containersView(sharedui.ResolveLayout(100, 30))
+	for _, section := range help.Sections {
+		if strings.Contains(section.Body, "log in to Docker Hub") {
+			t.Fatalf("login guidance remained after configured session: %#v", help.Sections)
+		}
+	}
+}
+
+func TestDockerHubUpdateErrorRestoresLoginGuidance(t *testing.T) {
+	model := loadedImageSelectionModel(t)
+	model.updates = testImageUpdateService()
+	model.dockerHubLoginChecked = true
+	model.dockerHubLoginConfigured = true
+	model.updatesGeneration = 2
+
+	updated, _ := model.Update(imageUpdatesLoadedMsg{generation: 2, updates: []domain.ImageUpdate{{ImageID: "one", Status: domain.UpdateUnknown, Reason: application.DockerHubLoginRequiredReason}}})
+	got := updated.(Model)
+	if got.dockerHubLoginConfigured {
+		t.Fatal("Docker Hub access error did not restore login guidance")
+	}
+}
+
+func TestPullActionRunsWithoutConfirmation(t *testing.T) {
+	model := loadedImageSelectionModel(t)
+	model.action = actionState{stage: actionMenu, resource: actionImages, targets: []actionTarget{{ID: "one", Name: "one:latest", PullRefs: []string{"one:latest"}}}, choices: []application.Action{application.ActionPull, application.ActionDelete, "cancel"}}
+
+	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil || !updated.(Model).action.running || updated.(Model).action.stage != actionMenu {
+		t.Fatalf("pull did not run directly: %#v", updated.(Model).action)
+	}
+}
+
+func TestConfirmationTimerDoesNotClearRunningAction(t *testing.T) {
+	model := loadedSelectionModel(t)
+	model.action = actionState{stage: actionConfirm, resource: actionContainers, running: true}
+	model.notice = "running"
+	model.noticeGeneration = 4
+
+	updated, _ := model.Update(actionNoticeExpiredMsg{generation: 4})
+	got := updated.(Model)
+	if !got.action.running || got.action.stage != actionConfirm || got.notice == "" {
+		t.Fatalf("timer cleared running action: %#v", got.action)
+	}
+}
+
+func TestResultNoticeExpiresWithoutResultScreen(t *testing.T) {
+	model := loadedSelectionModel(t)
+	model.showActionResult([]application.ActionResult{{ID: "one"}})
+	if model.action.stage != actionNone || model.notice == "" {
+		t.Fatalf("expected table state with result notice, got %#v", model)
+	}
+	updated, _ := model.Update(actionNoticeExpiredMsg{generation: model.noticeGeneration})
+	if updated.(Model).notice != "" {
+		t.Fatal("expired result notice must clear")
 	}
 }
 
@@ -415,32 +748,61 @@ func TestImageEditingSelectsMultipleImagesAndOpensDeleteOnlyMenu(t *testing.T) {
 	}
 }
 
-func TestImageDeleteConfirmationRequiresExactTextAndExplainsSafety(t *testing.T) {
+func TestUpdatedImageActionsOfferPullAndDeleteForSingleAndMultipleSelection(t *testing.T) {
+	model := loadedImageSelectionModel(t)
+	model.images[0].Update = domain.UpdateAvailable
+	model.images[1].Update = domain.UpdateAvailable
+	model.snapshot.Containers = []domain.Container{{ID: "one-container", Image: "one:latest", ImageID: "one", State: "running"}, {ID: "two-container", Image: "two:latest", ImageID: "two", State: "running"}}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	menu := updated.(Model)
+	if got, want := fmt.Sprint(menu.actionChoices()), "[pull delete cancel]"; got != want || len(menu.action.targets[0].PullRefs) != 1 {
+		t.Fatalf("single-image actions = %v targets=%#v, want %s", menu.actionChoices(), menu.action.targets, want)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	updated, _ = updated.(Model).Update(tea.KeyMsg{Type: tea.KeySpace})
+	updated, _ = updated.(Model).Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ = updated.(Model).Update(tea.KeyMsg{Type: tea.KeySpace})
+	multiple := updated.(Model)
+	updated, _ = multiple.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got, want := fmt.Sprint(updated.(Model).actionChoices()), "[pull delete cancel]"; got != want || len(updated.(Model).action.targets) != 2 {
+		t.Fatalf("multi-image actions = %s targets=%#v, want %s", got, updated.(Model).action.targets, want)
+	}
+}
+
+func TestPulledImageOffersRecreateForDirectContainers(t *testing.T) {
+	model := loadedImageSelectionModel(t)
+	model.images[0].Update = domain.UpdatePulledPendingRecreate
+	model.snapshot.Containers = []domain.Container{{ID: "container", Image: "one:latest", ImageID: "one", State: "running"}}
+	model.pendingRecreates["container"] = pendingImageRecreate{ContainerID: "container", ImageID: "one", Reference: "one:latest"}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	menu := updated.(Model)
+	if got, want := fmt.Sprint(menu.actionChoices()), "[recreate delete cancel]"; got != want || len(menu.action.targets[0].Recreate) != 1 {
+		t.Fatalf("pulled image actions = %s targets=%#v, want %s", got, menu.action.targets, want)
+	}
+
+	model.snapshot.Containers[0].ComposeProject = "stack"
+	model.pendingRecreates["container"] = pendingImageRecreate{ContainerID: "container", ImageID: "one", Reference: "one:latest", Compose: true}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got, want := fmt.Sprint(updated.(Model).actionChoices()), "[delete cancel]"; got != want {
+		t.Fatalf("Compose image actions = %s, want %s", got, want)
+	}
+}
+
+func TestImageDeleteConfirmationUsesY(t *testing.T) {
 	model := loadedImageSelectionModel(t)
 	model.action = actionState{stage: actionConfirm, resource: actionImages, targets: []actionTarget{{ID: "one", Name: "one:latest"}}}
 
 	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if command != nil || updated.(Model).action.running {
-		t.Fatal("image delete should not run without confirmation text")
-	}
-	view := updated.(Model).actionConfirmationView()
-	if !strings.Contains(view.Sections[1].Body, "without force") || !strings.Contains(view.Sections[1].Body, "used by containers") {
-		t.Fatalf("expected non-force usage warning, got %q", view.Sections[1].Body)
+		t.Fatal("enter must not confirm image deletion")
 	}
 
-	updated, _ = updated.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Delete")})
-	updated, command = updated.(Model).Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if command != nil || updated.(Model).action.running {
-		t.Fatal("image delete should require lowercase exact confirmation text")
-	}
-
-	model = loadedImageSelectionModel(t)
-	model.action = actionState{stage: actionConfirm, resource: actionImages, targets: []actionTarget{{ID: "one", Name: "one:latest"}}}
-	updated = model
-	updated, _ = updated.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("delete")})
-	confirmed, command := updated.(Model).Update(tea.KeyMsg{Type: tea.KeyEnter})
+	confirmed, command := updated.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if command == nil || !confirmed.(Model).action.running {
-		t.Fatal("expected image delete command after typing exact delete")
+		t.Fatal("y must confirm image deletion")
 	}
 }
 
@@ -461,7 +823,7 @@ func TestNetworkAndVolumeEditTablesShowActiveCheckboxCursor(t *testing.T) {
 	}
 }
 
-func TestNetworkAndVolumeEditingOpenDeleteMenuAndRequireExactConfirmation(t *testing.T) {
+func TestNetworkAndVolumeEditingOpenDeleteMenuAndConfirmWithY(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		model    Model
@@ -481,22 +843,13 @@ func TestNetworkAndVolumeEditingOpenDeleteMenuAndRequireExactConfirmation(t *tes
 			}
 			updated, _ = menu.Update(tea.KeyMsg{Type: tea.KeyEnter})
 			confirmation := updated.(Model)
-			if !strings.Contains(confirmation.actionConfirmationView().Sections[1].Body, test.warning) {
-				t.Fatalf("missing safety warning: %q", confirmation.actionConfirmationView().Sections[1].Body)
-			}
 			updated, command := confirmation.Update(tea.KeyMsg{Type: tea.KeyEnter})
 			if command != nil || updated.(Model).action.running {
-				t.Fatal("delete should require exact confirmation")
+				t.Fatal("enter must not confirm deletion")
 			}
-			updated, _ = updated.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Delete")})
-			updated, command = updated.(Model).Update(tea.KeyMsg{Type: tea.KeyEnter})
-			if command != nil || updated.(Model).action.running {
-				t.Fatal("delete should require lowercase exact confirmation")
-			}
-			confirmation.action.input = "delete"
-			updated, command = confirmation.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			updated, command = confirmation.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 			if command == nil || !updated.(Model).action.running {
-				t.Fatal("expected delete command after exact confirmation")
+				t.Fatal("y must confirm deletion")
 			}
 		})
 	}
@@ -653,8 +1006,8 @@ func (f fakeRuntime) LoadResources(context.Context) (ports.ResourceLoad, error) 
 func TestStacksLoadExpandAndKeepSelection(t *testing.T) {
 	stacks := []domain.Stack{{Name: "alpha", State: "mixed", Containers: 2, ContainerItems: []domain.Container{{ID: "web-id", Name: "web-1", ComposeService: "web", State: "running", Health: "healthy"}}}, {Name: "beta", State: "stopped", Containers: 1}}
 	model := NewModel(application.NewContainerService(fakeRuntime{stacks: stacks}), config.MemoryBoth)
-	model.snapshot.Containers = []domain.Container{{ID: "web-id", Name: "web-1", ComposeProject: "alpha", ComposeService: "web", State: "running", Health: "healthy"}}
-	updated, _ := model.Update(resourcesLoadedMsg{resources: ports.ResourceLoad{Stacks: stacks}})
+	snapshot := domain.Snapshot{Containers: []domain.Container{{ID: "web-id", Name: "web-1", ComposeProject: "alpha", ComposeService: "web", State: "running", Health: "healthy"}, {ID: "beta-id", Name: "beta-1", ComposeProject: "beta", ComposeService: "web", State: "exited", Health: "-"}}}
+	updated, _ := model.Update(loadedMsg{snapshot: snapshot, generation: model.generation})
 	loaded := updated.(Model)
 	updated, _ = loaded.Update(tea.KeyMsg{Type: tea.KeyRight})
 	loaded = updated.(Model)
@@ -665,7 +1018,7 @@ func TestStacksLoadExpandAndKeepSelection(t *testing.T) {
 	if got := updated.(Model); got.selectedStackContainerID != "web-id" || !strings.Contains(got.View(), "web-1") {
 		t.Fatalf("expected focused expanded container, got %#v", got)
 	}
-	updated, _ = updated.(Model).Update(resourcesLoadedMsg{resources: ports.ResourceLoad{Stacks: stacks}})
+	updated, _ = updated.(Model).Update(loadedMsg{snapshot: snapshot, generation: loaded.generation})
 	if got := updated.(Model); got.selectedStackName != "alpha" || got.expandedStackName != "alpha" {
 		t.Fatalf("expected stable stack state after refresh, got selected=%q expanded=%q", got.selectedStackName, got.expandedStackName)
 	}
@@ -739,7 +1092,7 @@ func TestStackChildNavigationSelectionLogsAndActions(t *testing.T) {
 	}
 	updated, _ = menu.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	confirmation := updated.(Model)
-	if selectedAction(actionStackContainers, 0) != application.ActionRestart || !strings.Contains(confirmation.actionConfirmationView().Sections[0].Body, "api-1") {
+	if selectedAction(actionStackContainers, 0) != application.ActionRestart || !strings.Contains(confirmation.confirmationBanner(), "api-1") {
 		t.Fatalf("expected restart confirmation for child, got %#v", confirmation.action)
 	}
 	updated, _ = child.Update(tea.KeyMsg{Type: tea.KeyEsc})
@@ -919,7 +1272,7 @@ func TestStackEditingShowsCheckboxesAndDownConfirmationUsesYOrN(t *testing.T) {
 	}
 	updated, _ = menu.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	confirm := updated.(Model)
-	if !strings.Contains(confirm.actionConfirmationView().Sections[1].Body, "[y/N]") {
+	if !strings.Contains(confirm.confirmationBanner(), "[y/N]") {
 		t.Fatal("expected y/n confirmation")
 	}
 	updated, command := confirm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
@@ -1060,6 +1413,10 @@ func (fakeRuntime) RemoveImage(context.Context, string, bool) error {
 	return nil
 }
 
+func (fakeRuntime) PullImage(context.Context, string) error { return nil }
+
+func (fakeRuntime) RecreateContainer(context.Context, string, string) error { return nil }
+
 func (fakeRuntime) RemoveNetwork(context.Context, string) error { return nil }
 
 func (fakeRuntime) RemoveVolume(context.Context, string) error { return nil }
@@ -1096,6 +1453,12 @@ func loadedImageSelectionModel(t *testing.T) Model {
 	model.images = []domain.Image{{ID: "one", Name: "one:latest"}, {ID: "two", Name: "two:latest"}}
 	model.syncImageSelection()
 	return model
+}
+
+func testImageUpdateService() *application.ImageUpdateService {
+	return application.NewImageUpdateService(application.CommandExecutor(func(context.Context, string, ...string) ([]byte, error) {
+		return []byte(`{"Descriptor":{"digest":"sha256:remote"}}`), nil
+	}), application.UpdateOptions{Enabled: true, Interval: time.Minute, Concurrency: 1})
 }
 
 func loadedNetworkSelectionModel(t *testing.T) Model {

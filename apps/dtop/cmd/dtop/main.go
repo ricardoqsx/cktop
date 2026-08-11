@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/adapters/docker"
@@ -24,7 +26,10 @@ func main() {
 		projects[index] = application.ComposeProject{Name: project.Name, WorkingDir: project.WorkingDir, Files: project.Files, MissingFiles: project.MissingFiles}
 	}
 	service := application.NewContainerService(runtime, projects...)
-	model := dtoptui.NewModel(service, settings.Display.MemoryMode, settings.ComposeDiagnostics...)
+	updates := application.NewImageUpdateService(application.CommandExecutor(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return exec.CommandContext(ctx, name, args...).CombinedOutput()
+	}), application.UpdateOptions{Enabled: settings.Updates.Enabled, Interval: settings.Updates.Interval, Concurrency: settings.Updates.Concurrency})
+	model := dtoptui.NewModelWithUpdates(service, settings.Display, updates, application.DockerHubLoginConfigured, settings.ComposeDiagnostics...)
 
 	_, err = tea.NewProgram(model, tea.WithAltScreen()).Run()
 	if err != nil {

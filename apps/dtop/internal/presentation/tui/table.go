@@ -15,8 +15,6 @@ import (
 
 const columnGap = "  "
 
-var activeEditMarkerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-
 type tableColumn struct {
 	title string
 	width int
@@ -24,6 +22,10 @@ type tableColumn struct {
 }
 
 func renderContainers(containers []domain.Container, selectedID string, selected map[string]struct{}, editing bool, now time.Time, layout sharedui.Layout, memoryMode config.MemoryMode) string {
+	return renderContainersWithColors(containers, selectedID, selected, editing, now, layout, memoryMode, "63", "15")
+}
+
+func renderContainersWithColors(containers []domain.Container, selectedID string, selected map[string]struct{}, editing bool, now time.Time, layout sharedui.Layout, memoryMode config.MemoryMode, accentColor, focusColor string) string {
 	columns := containerColumns(layout.ContentWidth, memoryMode, editing)
 	rows := visibleContainers(containers, selectedID, visibleRowCount(layout))
 
@@ -41,7 +43,7 @@ func renderContainers(containers []domain.Container, selectedID string, selected
 				marker = "[ ]"
 			}
 			if container.ID == selectedID {
-				marker = activeEditMarkerStyle.Render(">" + marker)
+				marker = activeEditMarkerStyle(accentColor).Render(">" + marker)
 			} else {
 				marker = " " + marker
 			}
@@ -49,10 +51,30 @@ func renderContainers(containers []domain.Container, selectedID string, selected
 			marker = ">"
 		}
 		builder.WriteString("\n")
-		builder.WriteString(renderTableRow(columns, container, marker, false, now, memoryMode))
+		focused := container.ID == selectedID
+		row := renderTableRow(columns, container, marker, false, now, memoryMode)
+		if focused {
+			row = renderFocusedTableRow(columns, container, marker, now, memoryMode, accentColor)
+		}
+		if focused {
+			row = focusedTableRow(row, tableWidth(columns), focusColor, accentColor)
+		}
+		builder.WriteString(row)
 	}
 
 	return builder.String()
+}
+
+func activeEditMarkerStyle(accentColor string) lipgloss.Style {
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(accentColor))
+}
+
+func focusedTableRow(row string, width int, focusColor, accentColor string) string {
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(focusColor)).Background(lipgloss.Color(accentColor)).Width(width).Render(row)
+}
+
+func focusedMenuRow(row string, width int, focusColor, accentColor string) string {
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(focusColor)).Background(lipgloss.Color(accentColor)).Width(width).Render(row)
 }
 
 func containerColumns(width int, memoryMode config.MemoryMode, editing bool) []tableColumn {
@@ -143,6 +165,35 @@ func renderTableRow(columns []tableColumn, container domain.Container, marker st
 	}
 
 	return strings.Join(values, columnGap)
+}
+
+func renderFocusedTableRow(columns []tableColumn, container domain.Container, marker string, now time.Time, memoryMode config.MemoryMode, accentColor string) string {
+	values := make([]string, len(columns))
+	for index, column := range columns {
+		value := ""
+		if index == 0 {
+			value = marker
+		} else if column.title == "CPU" {
+			values[index] = focusedMetricCell(fmt.Sprintf("%.1f%%", container.CPUPercent), container.CPUAvailable, column.width, accentColor)
+			continue
+		} else if column.title == "MEM" {
+			values[index] = focusedMetricCell(memoryText(container, memoryMode, column.width), container.MemoryAvailable, column.width, accentColor)
+			continue
+		} else if column.title == "UPTIME" {
+			value = formatUptime(container.StartedAt, container.State, now)
+		} else if column.value != nil {
+			value = column.value(container)
+		}
+		values[index] = fitCell(value, column.width)
+	}
+	return strings.Join(values, columnGap)
+}
+
+func focusedMetricCell(text string, available bool, width int, accentColor string) string {
+	if !available {
+		text = "-"
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Background(lipgloss.Color(accentColor)).Render(fitCell(text, width))
 }
 
 func cpuCell(container domain.Container, width int) string {

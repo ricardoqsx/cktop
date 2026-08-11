@@ -15,6 +15,10 @@ type resourceColumn[T any] struct {
 }
 
 func renderNetworks(networks []domain.Network, selectedID string, selected map[string]struct{}, editing bool, layout sharedui.Layout, now time.Time) string {
+	return renderNetworksWithColors(networks, selectedID, selected, editing, layout, now, "63", "15")
+}
+
+func renderNetworksWithColors(networks []domain.Network, selectedID string, selected map[string]struct{}, editing bool, layout sharedui.Layout, now time.Time, accentColor, focusColor string) string {
 	columns := []resourceColumn[domain.Network]{{title: "", width: resourceMarkerWidth(editing)}, {title: "NAME", width: 10, value: func(n domain.Network, _ time.Time) string { return n.Name }}}
 	if layout.ContentWidth >= 48 {
 		columns = append(columns, resourceColumn[domain.Network]{title: "DRIVER", width: 10, value: func(n domain.Network, _ time.Time) string { return n.Driver }})
@@ -28,10 +32,14 @@ func renderNetworks(networks []domain.Network, selectedID string, selected map[s
 	if layout.ContentWidth >= 120 {
 		columns = append(columns, resourceColumn[domain.Network]{title: "ID", width: 12, value: func(n domain.Network, _ time.Time) string { return n.ShortID }})
 	}
-	return renderResourceTable(networks, selectedID, selected, editing, columns, layout, now, func(n domain.Network) string { return n.ID })
+	return renderResourceTable(networks, selectedID, selected, editing, columns, layout, now, func(n domain.Network) string { return n.ID }, accentColor, focusColor)
 }
 
 func renderVolumes(volumes []domain.Volume, selectedName string, selected map[string]struct{}, editing bool, layout sharedui.Layout, now time.Time) string {
+	return renderVolumesWithColors(volumes, selectedName, selected, editing, layout, now, "63", "15")
+}
+
+func renderVolumesWithColors(volumes []domain.Volume, selectedName string, selected map[string]struct{}, editing bool, layout sharedui.Layout, now time.Time, accentColor, focusColor string) string {
 	columns := []resourceColumn[domain.Volume]{{title: "", width: resourceMarkerWidth(editing)}, {title: "NAME", width: 10, value: func(v domain.Volume, _ time.Time) string { return v.Name }}}
 	if layout.ContentWidth >= 48 {
 		columns = append(columns, resourceColumn[domain.Volume]{title: "DRIVER", width: 10, value: func(v domain.Volume, _ time.Time) string { return v.Driver }})
@@ -42,7 +50,7 @@ func renderVolumes(volumes []domain.Volume, selectedName string, selected map[st
 	if layout.ContentWidth >= 84 {
 		columns = append(columns, resourceColumn[domain.Volume]{title: "SCOPE", width: 8, value: func(v domain.Volume, _ time.Time) string { return v.Scope }})
 	}
-	return renderResourceTable(volumes, selectedName, selected, editing, columns, layout, now, func(v domain.Volume) string { return v.Name })
+	return renderResourceTable(volumes, selectedName, selected, editing, columns, layout, now, func(v domain.Volume) string { return v.Name }, accentColor, focusColor)
 }
 
 func resourceMarkerWidth(editing bool) int {
@@ -52,7 +60,7 @@ func resourceMarkerWidth(editing bool) int {
 	return 1
 }
 
-func renderResourceTable[T any](items []T, selectedID string, selected map[string]struct{}, editing bool, columns []resourceColumn[T], layout sharedui.Layout, now time.Time, id func(T) string) string {
+func renderResourceTable[T any](items []T, selectedID string, selected map[string]struct{}, editing bool, columns []resourceColumn[T], layout sharedui.Layout, now time.Time, id func(T) string, accentColor, focusColor string) string {
 	fixed := (len(columns) - 1) * len(columnGap)
 	for index, column := range columns {
 		if index != 1 {
@@ -90,7 +98,7 @@ func renderResourceTable[T any](items []T, selectedID string, selected map[strin
 				marker = "[x]"
 			}
 			if id(item) == selectedID {
-				marker = activeEditMarkerStyle.Render(">" + marker)
+				marker = activeEditMarkerStyle(accentColor).Render(">" + marker)
 			} else {
 				marker = " " + marker
 			}
@@ -98,7 +106,11 @@ func renderResourceTable[T any](items []T, selectedID string, selected map[strin
 			marker = ">"
 		}
 		builder.WriteString("\n")
-		builder.WriteString(render(item, false, marker))
+		row := render(item, false, marker)
+		if id(item) == selectedID {
+			row = focusedTableRow(row, imageTableWidthResource(columns), focusColor, accentColor)
+		}
+		builder.WriteString(row)
 	}
 	return builder.String()
 }

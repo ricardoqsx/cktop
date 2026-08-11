@@ -12,8 +12,39 @@ func TestLoadPathsUsesDefaultsWhenFilesAreMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if config.Display.MemoryMode != MemoryBoth {
-		t.Fatalf("expected both default, got %q", config.Display.MemoryMode)
+	if config.Display.MemoryMode != MemoryBoth || config.Display.AccentColor != "63" || config.Display.FocusColor != "15" || !config.Updates.Enabled || config.Updates.Scope != "running" || config.Updates.Interval.String() != "15m0s" || config.Updates.Concurrency != 4 {
+		t.Fatalf("unexpected display defaults: %#v", config.Display)
+	}
+}
+
+func TestLoadPathsParsesUpdatesAndRejectsUnsafeValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dtop.conf")
+	writeConfig(t, path, "[updates]\nenabled = false\nscope = running\ninterval = 20m\nconcurrency = 8\n")
+	loaded, err := LoadPaths(Paths{User: path})
+	if err != nil || loaded.Updates.Enabled || loaded.Updates.Interval.String() != "20m0s" || loaded.Updates.Concurrency != 8 {
+		t.Fatalf("updates=%#v err=%v", loaded.Updates, err)
+	}
+	writeConfig(t, path, "[updates]\ninterval = 30s\n")
+	if _, err := LoadPaths(Paths{User: path}); err == nil {
+		t.Fatal("expected unsafe interval rejection")
+	}
+}
+
+func TestLoadPathsParsesDisplayColors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dtop.conf")
+	writeConfig(t, path, "[display]\naccent_color = 12\nfocus_color = 231\n")
+
+	config, err := LoadPaths(Paths{User: path})
+	if err != nil || config.Display.AccentColor != "12" || config.Display.FocusColor != "231" {
+		t.Fatalf("unexpected display colors: %#v, %v", config.Display, err)
+	}
+}
+
+func TestLoadPathsRejectsInvalidDisplayColor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dtop.conf")
+	writeConfig(t, path, "[display]\nfocus_color = 256\n")
+	if _, err := LoadPaths(Paths{User: path}); err == nil || !strings.Contains(err.Error(), path+":2") {
+		t.Fatalf("expected controlled color config error, got %v", err)
 	}
 }
 

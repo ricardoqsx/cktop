@@ -33,6 +33,30 @@ func TestContainerServiceLoadsAggregateResources(t *testing.T) {
 	}
 }
 
+func TestPullImagesUsesEachReferenceOnce(t *testing.T) {
+	runtime := &fakeRuntime{errors: map[string]error{"failed:latest": errors.New("registry unavailable")}}
+	results := NewContainerService(runtime).PullImages(context.Background(), []string{"ok:latest", "ok:latest", "failed:latest"})
+
+	if got, want := fmt.Sprint(runtime.actions), "[pull:ok:latest pull:failed:latest]"; got != want {
+		t.Fatalf("pull calls = %s, want %s", got, want)
+	}
+	if len(results) != 2 || results[0].Err != nil || results[1].Err == nil {
+		t.Fatalf("unexpected pull results: %#v", results)
+	}
+}
+
+func TestRecreateImageContainersContinuesAfterFailure(t *testing.T) {
+	runtime := &fakeRuntime{errors: map[string]error{"failed": errors.New("start failed")}}
+	results := NewContainerService(runtime).RecreateImageContainers(context.Background(), []RecreateTarget{{ID: "ok", Reference: "app:latest"}, {ID: "failed", Reference: "app:latest"}})
+
+	if got, want := fmt.Sprint(runtime.actions), "[recreate:ok:app:latest recreate:failed:app:latest]"; got != want {
+		t.Fatalf("recreate calls = %s, want %s", got, want)
+	}
+	if len(results) != 2 || results[0].Err != nil || results[1].Err == nil {
+		t.Fatalf("unexpected recreate results: %#v", results)
+	}
+}
+
 func TestContainerServiceSortsByStateAndName(t *testing.T) {
 	service := NewContainerService(&fakeRuntime{})
 	snapshot := service.Sort(domain.Snapshot{Containers: []domain.Container{
@@ -321,6 +345,16 @@ func (f *fakeRuntime) Remove(_ context.Context, id string, force bool) error {
 
 func (f *fakeRuntime) RemoveImage(_ context.Context, id string, force bool) error {
 	f.actions = append(f.actions, "remove-image:"+id+":"+fmt.Sprint(force))
+	return f.errors[id]
+}
+
+func (f *fakeRuntime) PullImage(_ context.Context, id string) error {
+	f.actions = append(f.actions, "pull:"+id)
+	return f.errors[id]
+}
+
+func (f *fakeRuntime) RecreateContainer(_ context.Context, id string, reference string) error {
+	f.actions = append(f.actions, "recreate:"+id+":"+reference)
 	return f.errors[id]
 }
 

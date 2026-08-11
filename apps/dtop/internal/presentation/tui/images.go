@@ -16,6 +16,10 @@ type imageColumn struct {
 }
 
 func renderImages(images []domain.Image, selectedID string, selected map[string]struct{}, editing bool, layout sharedui.Layout, now time.Time) string {
+	return renderImagesWithColors(images, selectedID, selected, editing, layout, now, "63", "15")
+}
+
+func renderImagesWithColors(images []domain.Image, selectedID string, selected map[string]struct{}, editing bool, layout sharedui.Layout, now time.Time, accentColor, focusColor string) string {
 	columns := imageColumns(layout.ContentWidth, editing)
 	rows := visibleImages(images, selectedID, visibleRowCount(layout))
 	var builder strings.Builder
@@ -31,7 +35,7 @@ func renderImages(images []domain.Image, selectedID string, selected map[string]
 				marker = "[ ]"
 			}
 			if image.ID == selectedID {
-				marker = activeEditMarkerStyle.Render(">" + marker)
+				marker = activeEditMarkerStyle(accentColor).Render(">" + marker)
 			} else {
 				marker = " " + marker
 			}
@@ -39,7 +43,11 @@ func renderImages(images []domain.Image, selectedID string, selected map[string]
 			marker = ">"
 		}
 		builder.WriteString("\n")
-		builder.WriteString(renderImageRow(columns, image, false, now, marker))
+		row := renderImageRow(columns, image, false, now, marker)
+		if image.ID == selectedID {
+			row = focusedTableRow(row, imageTableWidth(columns), focusColor, accentColor)
+		}
+		builder.WriteString(row)
 	}
 	return builder.String()
 }
@@ -55,6 +63,9 @@ func imageColumns(width int, editing bool) []imageColumn {
 	columns := []imageColumn{
 		{title: "", width: markerWidth},
 		{title: "NAME", width: 10, value: func(image domain.Image, _ time.Time) string { return image.Name }},
+	}
+	if width >= 36 {
+		columns = append(columns, imageColumn{title: "UPDATE", width: 6, value: func(image domain.Image, _ time.Time) string { return imageUpdateIndicator(image.Update) }})
 	}
 	if width >= 48 {
 		columns = append(columns, imageColumn{title: "SIZE", width: 8, value: func(image domain.Image, _ time.Time) string { return formatBytes(image.Size) }})
@@ -76,6 +87,23 @@ func imageColumns(width int, editing bool) []imageColumn {
 	}
 	columns[1].width = width - fixed
 	return columns
+}
+
+func imageUpdateIndicator(status domain.UpdateStatus) string {
+	switch status {
+	case domain.UpdateAvailable:
+		return "U"
+	case domain.UpdateCurrent:
+		return "="
+	case domain.UpdatePinned:
+		return "P"
+	case domain.UpdateChecking:
+		return "..."
+	case domain.UpdatePulledPendingRecreate:
+		return "R"
+	default:
+		return "?"
+	}
 }
 
 func renderImageRow(columns []imageColumn, image domain.Image, header bool, now time.Time, marker string) string {

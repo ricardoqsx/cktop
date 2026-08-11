@@ -39,6 +39,8 @@ type Runtime interface {
 	Restart(ctx context.Context, id string) error
 	Remove(ctx context.Context, id string, force bool) error
 	RemoveImage(ctx context.Context, id string, force bool) error
+	PullImage(ctx context.Context, reference string) error
+	RecreateContainer(ctx context.Context, id string, reference string) error
 	RemoveNetwork(ctx context.Context, id string) error
 	RemoveVolume(ctx context.Context, name string) error
 	Up(ctx context.Context, stack domain.Stack) error

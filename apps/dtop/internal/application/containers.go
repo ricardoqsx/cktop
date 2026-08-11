@@ -22,17 +22,24 @@ const (
 type Action string
 
 const (
-	ActionStop    Action = "stop"
-	ActionRestart Action = "restart"
-	ActionDelete  Action = "delete"
-	ActionDown    Action = "down"
-	ActionUp      Action = "up"
+	ActionStop     Action = "stop"
+	ActionRestart  Action = "restart"
+	ActionDelete   Action = "delete"
+	ActionDown     Action = "down"
+	ActionUp       Action = "up"
+	ActionPull     Action = "pull"
+	ActionRecreate Action = "recreate"
 )
 
 type ActionResult struct {
 	ID     string
 	Action Action
 	Err    error
+}
+
+type RecreateTarget struct {
+	ID        string
+	Reference string
 }
 
 type ContainerService struct {
@@ -319,6 +326,27 @@ func (s ContainerService) RemoveImages(ctx context.Context, ids []string) []Acti
 		results = append(results, ActionResult{ID: id, Action: ActionDelete, Err: s.runtime.RemoveImage(ctx, id, false)})
 	}
 
+	return results
+}
+
+func (s ContainerService) PullImages(ctx context.Context, references []string) []ActionResult {
+	results := make([]ActionResult, 0, len(references))
+	seen := make(map[string]struct{}, len(references))
+	for _, reference := range references {
+		if _, found := seen[reference]; found {
+			continue
+		}
+		seen[reference] = struct{}{}
+		results = append(results, ActionResult{ID: reference, Action: ActionPull, Err: s.runtime.PullImage(ctx, reference)})
+	}
+	return results
+}
+
+func (s ContainerService) RecreateImageContainers(ctx context.Context, targets []RecreateTarget) []ActionResult {
+	results := make([]ActionResult, 0, len(targets))
+	for _, target := range targets {
+		results = append(results, ActionResult{ID: target.ID, Action: ActionRecreate, Err: s.runtime.RecreateContainer(ctx, target.ID, target.Reference)})
+	}
 	return results
 }
 

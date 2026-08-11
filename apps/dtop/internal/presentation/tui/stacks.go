@@ -9,7 +9,7 @@ import (
 )
 
 func (m Model) stacksView(layout sharedui.Layout) sharedui.View {
-	if (m.action.resource == actionStacks || m.action.resource == actionStackContainers) && m.action.stage != actionNone {
+	if (m.action.resource == actionStacks || m.action.resource == actionStackContainers) && m.action.stage == actionMenu {
 		return m.actionView()
 	}
 	if m.stacksLoading || !m.stacksLoaded {
@@ -27,7 +27,7 @@ func (m Model) stacksView(layout sharedui.Layout) sharedui.View {
 	if len(m.stacks) == 0 && len(m.stackDiagnostics) == 0 {
 		return sharedui.View{Title: "Stacks", Status: sharedui.StatusEmpty, Summary: "No stacks found. Only stacks with Docker Compose labels can be discovered."}
 	}
-	sections := []sharedui.Section{{Body: renderStacks(m.stacks, m.selectedStackName, m.selectedStackContainerID, m.selectedStacks, m.selectedStackContainers, m.stackEditing, m.stackContainerEditing, m.expandedStackName, layout)}}
+	sections := []sharedui.Section{{Body: renderStacksWithColors(m.stacks, m.selectedStackName, m.selectedStackContainerID, m.selectedStacks, m.selectedStackContainers, m.stackEditing, m.stackContainerEditing, m.expandedStackName, layout, m.accentColor, m.focusColor)}}
 	if stack := m.selectedStack(); stack != nil {
 		width := layout.ContentWidth
 		if width < 20 {
@@ -54,6 +54,10 @@ func (m Model) stacksView(layout sharedui.Layout) sharedui.View {
 }
 
 func renderStacks(stacks []domain.Stack, selected, selectedContainer string, selections, selectedContainers map[string]struct{}, editing, childEditing bool, expanded string, layout sharedui.Layout) string {
+	return renderStacksWithColors(stacks, selected, selectedContainer, selections, selectedContainers, editing, childEditing, expanded, layout, "63", "15")
+}
+
+func renderStacksWithColors(stacks []domain.Stack, selected, selectedContainer string, selections, selectedContainers map[string]struct{}, editing, childEditing bool, expanded string, layout sharedui.Layout, accentColor, focusColor string) string {
 	// Stack rows use the resource table sizing rules but retain expandable detail rows.
 	width := layout.ContentWidth
 	if width < 20 {
@@ -121,7 +125,7 @@ func renderStacks(stacks []domain.Stack, selected, selectedContainer string, sel
 				marker = "[x]"
 			}
 			if stack.Name == selected {
-				marker = activeEditMarkerStyle.Render(">") + marker
+				marker = activeEditMarkerStyle(accentColor).Render(">") + marker
 			} else {
 				marker = " " + marker
 			}
@@ -129,7 +133,11 @@ func renderStacks(stacks []domain.Stack, selected, selectedContainer string, sel
 			marker = ">"
 		}
 		builder.WriteString("\n")
-		builder.WriteString(render(stack, nil, false, marker))
+		row := render(stack, nil, false, marker)
+		if stack.Name == selected {
+			row = focusedTableRow(row, width, focusColor, accentColor)
+		}
+		builder.WriteString(row)
 		if stack.Name != expanded {
 			continue
 		}
@@ -145,14 +153,18 @@ func renderStacks(stacks []domain.Stack, selected, selectedContainer string, sel
 					marker = "[x]"
 				}
 				if container.ID == selectedContainer {
-					marker = activeEditMarkerStyle.Render(">") + marker
+					marker = activeEditMarkerStyle(accentColor).Render(">") + marker
 				} else {
 					marker = " " + marker
 				}
 			} else if container.ID == selectedContainer {
 				marker = ">"
 			}
-			builder.WriteString("\n" + render(domain.Stack{}, &container, false, marker))
+			row := render(domain.Stack{}, &container, false, marker)
+			if container.ID == selectedContainer {
+				row = focusedTableRow(row, width, focusColor, accentColor)
+			}
+			builder.WriteString("\n" + row)
 		}
 	}
 	return builder.String()

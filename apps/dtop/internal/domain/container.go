@@ -21,6 +21,7 @@ type Container struct {
 	ShortID            string
 	Name               string
 	Image              string
+	ImageID            string
 	State              string
 	Status             string
 	Health             string

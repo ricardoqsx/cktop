@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 )
 
 type MemoryMode string
@@ -19,12 +21,22 @@ const (
 
 type Config struct {
 	Display            Display
+	Updates            Updates
 	ComposeProjects    []ComposeProject
 	ComposeDiagnostics []string
 }
 
 type Display struct {
-	MemoryMode MemoryMode
+	MemoryMode  MemoryMode
+	AccentColor string
+	FocusColor  string
+}
+
+type Updates struct {
+	Enabled     bool
+	Scope       string
+	Interval    time.Duration
+	Concurrency int
 }
 
 // ComposeProject is a validated, read-only registration from dtop.conf.
@@ -41,7 +53,7 @@ type Paths struct {
 }
 
 func Default() Config {
-	return Config{Display: Display{MemoryMode: MemoryBoth}}
+	return Config{Display: Display{MemoryMode: MemoryBoth, AccentColor: "63", FocusColor: "15"}, Updates: Updates{Enabled: true, Scope: "running", Interval: 15 * time.Minute, Concurrency: 4}}
 }
 
 func Load() (Config, error) {
@@ -114,8 +126,8 @@ func mergeFile(config *Config, path string) error {
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 			finishCompose()
 			section = strings.TrimSpace(line[1 : len(line)-1])
-			if strings.EqualFold(section, "display") {
-				section = "display"
+			if strings.EqualFold(section, "display") || strings.EqualFold(section, "updates") {
+				section = strings.ToLower(section)
 				continue
 			}
 			name, ok := composeSectionName(section)
@@ -147,15 +159,59 @@ func mergeFile(config *Config, path string) error {
 			}
 			continue
 		}
-		if section != "display" || key != "memory_mode" {
+		if section != "display" && section != "updates" {
 			return configError(path, lineNumber, "unsupported key %q in section %q", key, section)
 		}
-
-		mode := MemoryMode(strings.ToLower(value))
-		if !mode.Valid() {
-			return configError(path, lineNumber, "memory_mode must be usage, percent, or both")
+		if section == "updates" {
+			switch key {
+			case "enabled":
+				value, err := strconv.ParseBool(value)
+				if err != nil {
+					return configError(path, lineNumber, "enabled must be true or false")
+				}
+				config.Updates.Enabled = value
+			case "scope":
+				if strings.ToLower(value) != "running" {
+					return configError(path, lineNumber, "scope must be running")
+				}
+				config.Updates.Scope = "running"
+			case "interval":
+				duration, err := time.ParseDuration(value)
+				if err != nil || duration < time.Minute {
+					return configError(path, lineNumber, "interval must be at least 1m")
+				}
+				config.Updates.Interval = duration
+			case "concurrency":
+				concurrency, err := strconv.Atoi(value)
+				if err != nil || concurrency < 1 || concurrency > 16 {
+					return configError(path, lineNumber, "concurrency must be from 1 through 16")
+				}
+				config.Updates.Concurrency = concurrency
+			default:
+				return configError(path, lineNumber, "unsupported key %q in section %q", key, section)
+			}
+			continue
 		}
-		config.Display.MemoryMode = mode
+		switch key {
+		case "memory_mode":
+			mode := MemoryMode(strings.ToLower(value))
+			if !mode.Valid() {
+				return configError(path, lineNumber, "memory_mode must be usage, percent, or both")
+			}
+			config.Display.MemoryMode = mode
+		case "accent_color":
+			if !validANSIColor(value) {
+				return configError(path, lineNumber, "accent_color must be an ANSI color from 0 through 255")
+			}
+			config.Display.AccentColor = value
+		case "focus_color":
+			if !validANSIColor(value) {
+				return configError(path, lineNumber, "focus_color must be an ANSI color from 0 through 255")
+			}
+			config.Display.FocusColor = value
+		default:
+			return configError(path, lineNumber, "unsupported key %q in section %q", key, section)
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("read config %s: %w", path, err)
@@ -163,6 +219,11 @@ func mergeFile(config *Config, path string) error {
 	finishCompose()
 
 	return nil
+}
+
+func validANSIColor(value string) bool {
+	color, err := strconv.Atoi(value)
+	return err == nil && color >= 0 && color <= 255
 }
 
 type composeSection struct {
