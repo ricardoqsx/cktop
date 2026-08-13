@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/domain"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/ports"
@@ -29,17 +30,26 @@ const (
 	ActionUp       Action = "up"
 	ActionPull     Action = "pull"
 	ActionRecreate Action = "recreate"
+	ActionUpdate   Action = "update"
+	ActionApply    Action = "apply_update"
 )
 
 type ActionResult struct {
-	ID     string
-	Action Action
-	Err    error
+	ID      string
+	Action  Action
+	Err     error
+	Pulled  bool
+	Applied bool
 }
 
 type RecreateTarget struct {
 	ID        string
 	Reference string
+}
+
+type StackUpdateTarget struct {
+	Stack    domain.Stack
+	Services []string
 }
 
 type ContainerService struct {
@@ -253,6 +263,19 @@ func (s ContainerService) actStacks(ctx context.Context, action Action, stacks [
 				result.Err = s.runtime.StopStack(ctx, stack)
 			case ActionRestart:
 				result.Err = s.runtime.RestartStack(ctx, stack)
+			case ActionPull:
+				result.Err = s.runtime.PullStack(ctx, stack)
+				result.Pulled = result.Err == nil
+			case ActionUpdate:
+				result.Err = s.runtime.PullStack(ctx, stack)
+				result.Pulled = result.Err == nil
+				if result.Err == nil {
+					result.Err = s.runtime.Up(ctx, stack)
+					result.Applied = result.Err == nil
+				}
+			case ActionApply:
+				result.Err = s.runtime.Up(ctx, stack)
+				result.Applied = result.Err == nil
 			case ActionDown:
 				result.Err = s.runtime.Down(ctx, stack)
 			default:
@@ -345,7 +368,89 @@ func (s ContainerService) PullImages(ctx context.Context, references []string) [
 func (s ContainerService) RecreateImageContainers(ctx context.Context, targets []RecreateTarget) []ActionResult {
 	results := make([]ActionResult, 0, len(targets))
 	for _, target := range targets {
-		results = append(results, ActionResult{ID: target.ID, Action: ActionRecreate, Err: s.runtime.RecreateContainer(ctx, target.ID, target.Reference)})
+		err := s.recreateContainer(ctx, target)
+		results = append(results, ActionResult{ID: target.ID, Action: ActionRecreate, Err: err, Applied: err == nil})
+	}
+	return results
+}
+
+// PullContainerUpdates deduplicates registry pulls while reporting one result
+// per container so batch outcomes remain attributable to their selected rows.
+func (s ContainerService) PullContainerUpdates(ctx context.Context, targets []RecreateTarget) []ActionResult {
+	pulls := s.pullUpdateReferences(ctx, targets)
+	results := make([]ActionResult, 0, len(targets))
+	for _, target := range targets {
+		err := pulls[target.Reference]
+		results = append(results, ActionResult{ID: target.ID, Action: ActionPull, Err: err, Pulled: err == nil})
+	}
+	return results
+}
+
+// UpdateContainers pulls each reference once and recreates only containers
+// whose pull succeeded. A failed recreate remains distinguishable from a
+// failed pull so presentation can retain the downloaded-pending state.
+func (s ContainerService) UpdateContainers(ctx context.Context, targets []RecreateTarget) []ActionResult {
+	pulls := s.pullUpdateReferences(ctx, targets)
+	results := make([]ActionResult, 0, len(targets))
+	for _, target := range targets {
+		if err := pulls[target.Reference]; err != nil {
+			results = append(results, ActionResult{ID: target.ID, Action: ActionUpdate, Err: err})
+			continue
+		}
+		err := s.recreateContainer(ctx, target)
+		results = append(results, ActionResult{ID: target.ID, Action: ActionUpdate, Err: err, Pulled: true, Applied: err == nil})
+	}
+	return results
+}
+
+func (s ContainerService) ApplyContainerUpdates(ctx context.Context, targets []RecreateTarget) []ActionResult {
+	results := make([]ActionResult, 0, len(targets))
+	for _, target := range targets {
+		err := s.recreateContainer(ctx, target)
+		results = append(results, ActionResult{ID: target.ID, Action: ActionApply, Err: err, Applied: err == nil})
+	}
+	return results
+}
+
+func (s ContainerService) UpdateStackServices(ctx context.Context, action Action, targets []StackUpdateTarget) []ActionResult {
+	results := make([]ActionResult, 0, len(targets))
+	for _, target := range targets {
+		result := ActionResult{ID: target.Stack.Name, Action: action}
+		switch action {
+		case ActionPull:
+			result.Err = s.runtime.PullStackServices(ctx, target.Stack, target.Services)
+			result.Pulled = result.Err == nil
+		case ActionUpdate:
+			result.Err = s.runtime.PullStackServices(ctx, target.Stack, target.Services)
+			result.Pulled = result.Err == nil
+			if result.Err == nil {
+				result.Err = s.runtime.UpStackServices(ctx, target.Stack, target.Services)
+				result.Applied = result.Err == nil
+			}
+		case ActionApply:
+			result.Err = s.runtime.UpStackServices(ctx, target.Stack, target.Services)
+			result.Applied = result.Err == nil
+		default:
+			result.Err = fmt.Errorf("unsupported stack update action %q", action)
+		}
+		results = append(results, result)
+	}
+	return results
+}
+
+func (s ContainerService) recreateContainer(ctx context.Context, target RecreateTarget) error {
+	operationCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	return s.runtime.RecreateContainer(operationCtx, target.ID, target.Reference)
+}
+
+func (s ContainerService) pullUpdateReferences(ctx context.Context, targets []RecreateTarget) map[string]error {
+	results := make(map[string]error, len(targets))
+	for _, target := range targets {
+		if _, found := results[target.Reference]; found {
+			continue
+		}
+		results[target.Reference] = s.runtime.PullImage(ctx, target.Reference)
 	}
 	return results
 }

@@ -28,9 +28,11 @@ const (
 )
 
 type ImageUpdate struct {
-	ImageID string
-	Status  UpdateStatus
-	Reason  string
+	ContainerID string
+	ImageID     string
+	Reference   string
+	Status      UpdateStatus
+	Reason      string
 }
 
 type ImageDetails struct {

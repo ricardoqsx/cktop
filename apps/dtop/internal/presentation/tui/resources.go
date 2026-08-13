@@ -5,50 +5,64 @@ import (
 	"time"
 
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/domain"
+	"github.com/ricardoqsx/cktop/apps/dtop/internal/i18n"
 	sharedui "github.com/ricardoqsx/cktop/libs/tui"
 )
 
 type resourceColumn[T any] struct {
+	id    string
 	title string
 	width int
 	value func(T, time.Time) string
 }
 
 func renderNetworks(networks []domain.Network, selectedID string, selected map[string]struct{}, editing bool, layout sharedui.Layout, now time.Time) string {
-	return renderNetworksWithColors(networks, selectedID, selected, editing, layout, now, "63", "15")
+	return renderNetworksLocalized(networks, selectedID, selected, editing, layout, now, "63", "15", i18n.New("en"))
 }
 
 func renderNetworksWithColors(networks []domain.Network, selectedID string, selected map[string]struct{}, editing bool, layout sharedui.Layout, now time.Time, accentColor, focusColor string) string {
-	columns := []resourceColumn[domain.Network]{{title: "", width: resourceMarkerWidth(editing)}, {title: "NAME", width: 10, value: func(n domain.Network, _ time.Time) string { return n.Name }}}
+	return renderNetworksLocalized(networks, selectedID, selected, editing, layout, now, accentColor, focusColor, i18n.New("en"))
+}
+
+func renderNetworksLocalized(networks []domain.Network, selectedID string, selected map[string]struct{}, editing bool, layout sharedui.Layout, now time.Time, accentColor, focusColor string, localizer sharedui.Localizer) string {
+	columns := []resourceColumn[domain.Network]{{id: "marker", title: "", width: resourceMarkerWidth(editing)}, {id: "name", title: localizer.Text(i18n.MessageColumnName), width: 10, value: func(n domain.Network, _ time.Time) string { return n.Name }}}
 	if layout.ContentWidth >= 48 {
-		columns = append(columns, resourceColumn[domain.Network]{title: "DRIVER", width: 10, value: func(n domain.Network, _ time.Time) string { return n.Driver }})
+		columns = append(columns, resourceColumn[domain.Network]{id: "driver", title: localizer.Text(i18n.MessageColumnDriver), width: 10, value: func(n domain.Network, _ time.Time) string { return n.Driver }})
 	}
 	if layout.ContentWidth >= 68 {
-		columns = append(columns, resourceColumn[domain.Network]{title: "USED", width: 12, value: func(n domain.Network, _ time.Time) string { return resourceUsage(n.Containers, n.UsageKnown) }})
+		columns = append(columns, resourceColumn[domain.Network]{id: "used", title: localizer.Text(i18n.MessageColumnUsed), width: 12, value: func(n domain.Network, _ time.Time) string {
+			return resourceUsageLocalized(n.Containers, n.UsageKnown, localizer)
+		}})
 	}
 	if layout.ContentWidth >= 84 {
-		columns = append(columns, resourceColumn[domain.Network]{title: "SCOPE", width: 8, value: func(n domain.Network, _ time.Time) string { return n.Scope }})
+		columns = append(columns, resourceColumn[domain.Network]{id: "scope", title: localizer.Text(i18n.MessageColumnScope), width: 8, value: func(n domain.Network, _ time.Time) string { return n.Scope }})
 	}
 	if layout.ContentWidth >= 120 {
-		columns = append(columns, resourceColumn[domain.Network]{title: "ID", width: 12, value: func(n domain.Network, _ time.Time) string { return n.ShortID }})
+		columns = append(columns, resourceColumn[domain.Network]{id: "id", title: localizer.Text(i18n.MessageColumnID), width: 12, value: func(n domain.Network, _ time.Time) string { return n.ShortID }})
 	}
 	return renderResourceTable(networks, selectedID, selected, editing, columns, layout, now, func(n domain.Network) string { return n.ID }, accentColor, focusColor)
 }
 
 func renderVolumes(volumes []domain.Volume, selectedName string, selected map[string]struct{}, editing bool, layout sharedui.Layout, now time.Time) string {
-	return renderVolumesWithColors(volumes, selectedName, selected, editing, layout, now, "63", "15")
+	return renderVolumesLocalized(volumes, selectedName, selected, editing, layout, now, "63", "15", i18n.New("en"))
 }
 
 func renderVolumesWithColors(volumes []domain.Volume, selectedName string, selected map[string]struct{}, editing bool, layout sharedui.Layout, now time.Time, accentColor, focusColor string) string {
-	columns := []resourceColumn[domain.Volume]{{title: "", width: resourceMarkerWidth(editing)}, {title: "NAME", width: 10, value: func(v domain.Volume, _ time.Time) string { return v.Name }}}
+	return renderVolumesLocalized(volumes, selectedName, selected, editing, layout, now, accentColor, focusColor, i18n.New("en"))
+}
+
+func renderVolumesLocalized(volumes []domain.Volume, selectedName string, selected map[string]struct{}, editing bool, layout sharedui.Layout, now time.Time, accentColor, focusColor string, localizer sharedui.Localizer) string {
+	columns := []resourceColumn[domain.Volume]{{id: "marker", title: "", width: resourceMarkerWidth(editing)}, {id: "name", title: localizer.Text(i18n.MessageColumnName), width: 10, value: func(v domain.Volume, _ time.Time) string { return v.Name }}}
 	if layout.ContentWidth >= 48 {
-		columns = append(columns, resourceColumn[domain.Volume]{title: "DRIVER", width: 10, value: func(v domain.Volume, _ time.Time) string { return v.Driver }})
+		columns = append(columns, resourceColumn[domain.Volume]{id: "driver", title: localizer.Text(i18n.MessageColumnDriver), width: 10, value: func(v domain.Volume, _ time.Time) string { return v.Driver }})
 	}
 	if layout.ContentWidth >= 68 {
-		columns = append(columns, resourceColumn[domain.Volume]{title: "USED", width: 12, value: func(v domain.Volume, _ time.Time) string { return resourceUsage(v.Containers, v.UsageKnown) }})
+		columns = append(columns, resourceColumn[domain.Volume]{id: "used", title: localizer.Text(i18n.MessageColumnUsed), width: 12, value: func(v domain.Volume, _ time.Time) string {
+			return resourceUsageLocalized(v.Containers, v.UsageKnown, localizer)
+		}})
 	}
 	if layout.ContentWidth >= 84 {
-		columns = append(columns, resourceColumn[domain.Volume]{title: "SCOPE", width: 8, value: func(v domain.Volume, _ time.Time) string { return v.Scope }})
+		columns = append(columns, resourceColumn[domain.Volume]{id: "scope", title: localizer.Text(i18n.MessageColumnScope), width: 8, value: func(v domain.Volume, _ time.Time) string { return v.Scope }})
 	}
 	return renderResourceTable(volumes, selectedName, selected, editing, columns, layout, now, func(v domain.Volume) string { return v.Name }, accentColor, focusColor)
 }
@@ -145,11 +159,12 @@ func visibleResourceItems[T any](items []T, selectedID string, limit int, id fun
 }
 
 func resourceUsage(count int, known bool) string {
+	return resourceUsageLocalized(count, known, i18n.New("en"))
+}
+
+func resourceUsageLocalized(count int, known bool, localizer sharedui.Localizer) string {
 	if !known {
-		return "unknown"
+		return localizer.Text(i18n.MessageCommonUnknown)
 	}
-	if count == 1 {
-		return "1 container"
-	}
-	return formatCount(int64(count)) + " containers"
+	return localizer.Plural(i18n.MessageUsageContainers, count)
 }

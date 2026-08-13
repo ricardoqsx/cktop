@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os/exec"
 	"reflect"
 	"sort"
@@ -15,18 +14,21 @@ import (
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/application"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/config"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/domain"
+	"github.com/ricardoqsx/cktop/apps/dtop/internal/i18n"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/ports"
 	sharedui "github.com/ricardoqsx/cktop/libs/tui"
 )
 
 type Model struct {
 	service                  application.ContainerService
+	localizer                sharedui.Localizer
 	updates                  *application.ImageUpdateService
 	updatesStarted           bool
 	updatesRunning           bool
 	updatesGeneration        uint64
 	updatesCancel            context.CancelFunc
 	updatesChecking          map[string]domain.UpdateStatus
+	containerUpdates         map[string]domain.UpdateStatus
 	pendingRecreates         map[string]pendingImageRecreate
 	dockerHubLoginCheck      func(context.Context) bool
 	dockerHubLoginChecked    bool
@@ -132,8 +134,10 @@ type keyMap struct {
 	back      key.Binding
 	sort      key.Binding
 	edit      key.Binding
+	selectAll key.Binding
 	selectRow key.Binding
 	confirm   key.Binding
+	details   key.Binding
 	logs      key.Binding
 	shell     key.Binding
 }
@@ -170,9 +174,13 @@ type actionTarget struct {
 	ID          string
 	Name        string
 	State       string
+	ImageID     string
+	Update      domain.UpdateStatus
 	Unavailable string
 	PullRefs    []string
 	Recreate    []application.RecreateTarget
+	Stack       *domain.Stack
+	Service     string
 }
 
 type actionState struct {
@@ -303,17 +311,25 @@ func NewModel(service application.ContainerService, memoryMode config.MemoryMode
 }
 
 func NewModelWithDisplay(service application.ContainerService, display config.Display, stackDiagnostics ...string) Model {
-	return newModel(service, display, nil, nil, stackDiagnostics...)
+	return newModel(service, display, nil, nil, nil, stackDiagnostics...)
 }
 
 func NewModelWithUpdates(service application.ContainerService, display config.Display, updates *application.ImageUpdateService, dockerHubLoginCheck func(context.Context) bool, stackDiagnostics ...string) Model {
-	return newModel(service, display, updates, dockerHubLoginCheck, stackDiagnostics...)
+	return newModel(service, display, updates, dockerHubLoginCheck, nil, stackDiagnostics...)
 }
 
-func newModel(service application.ContainerService, display config.Display, updates *application.ImageUpdateService, dockerHubLoginCheck func(context.Context) bool, stackDiagnostics ...string) Model {
+func NewModelWithUpdatesAndLocalizer(service application.ContainerService, display config.Display, updates *application.ImageUpdateService, dockerHubLoginCheck func(context.Context) bool, localizer sharedui.Localizer, stackDiagnostics ...string) Model {
+	return newModel(service, display, updates, dockerHubLoginCheck, localizer, stackDiagnostics...)
+}
+
+func newModel(service application.ContainerService, display config.Display, updates *application.ImageUpdateService, dockerHubLoginCheck func(context.Context) bool, localizer sharedui.Localizer, stackDiagnostics ...string) Model {
+	if localizer == nil {
+		localizer = i18n.New("en")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return Model{
 		service:                 service,
+		localizer:               localizer,
 		updates:                 updates,
 		dockerHubLoginCheck:     dockerHubLoginCheck,
 		memoryMode:              display.MemoryMode,
@@ -336,22 +352,25 @@ func newModel(service application.ContainerService, display config.Display, upda
 		selectedStacks:          make(map[string]struct{}),
 		selectedStackContainers: make(map[string]struct{}),
 		updatesChecking:         make(map[string]domain.UpdateStatus),
+		containerUpdates:        make(map[string]domain.UpdateStatus),
 		pendingRecreates:        make(map[string]pendingImageRecreate),
 		keys: keyMap{
-			quit:      key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
-			next:      key.NewBinding(key.WithKeys("right"), key.WithHelp("right", "next view")),
-			prev:      key.NewBinding(key.WithKeys("left"), key.WithHelp("left", "previous view")),
-			retry:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "retry")),
-			up:        key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("up/k", "up")),
-			down:      key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("down/j", "down")),
-			help:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-			back:      key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-			sort:      key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "sort")),
-			edit:      key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
-			selectRow: key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "select")),
-			confirm:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "actions")),
-			logs:      key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "logs")),
-			shell:     key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "shell")),
+			quit:      key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", localizer.Text(i18n.MessageKeyQuit))),
+			next:      key.NewBinding(key.WithKeys("right"), key.WithHelp("right", localizer.Text(i18n.MessageKeyNext))),
+			prev:      key.NewBinding(key.WithKeys("left"), key.WithHelp("left", localizer.Text(i18n.MessageKeyPrevious))),
+			retry:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", localizer.Text(i18n.MessageKeyRetry))),
+			up:        key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("up/k", localizer.Text(i18n.MessageKeyUp))),
+			down:      key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("down/j", localizer.Text(i18n.MessageKeyDown))),
+			help:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", localizer.Text(i18n.MessageKeyHelp))),
+			back:      key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", localizer.Text(i18n.MessageKeyBack))),
+			sort:      key.NewBinding(key.WithKeys("o"), key.WithHelp("o", localizer.Text(i18n.MessageKeySort))),
+			edit:      key.NewBinding(key.WithKeys("e"), key.WithHelp("e", localizer.Text(i18n.MessageKeyEdit))),
+			selectAll: key.NewBinding(key.WithKeys("a"), key.WithHelp("a", localizer.Text(i18n.MessageKeyAll))),
+			selectRow: key.NewBinding(key.WithKeys(" "), key.WithHelp("space", localizer.Text(i18n.MessageKeySelect))),
+			confirm:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", localizer.Text(i18n.MessageKeyActions))),
+			details:   key.NewBinding(key.WithKeys("d"), key.WithHelp("d", localizer.Text(i18n.MessageKeyDetails))),
+			logs:      key.NewBinding(key.WithKeys("l"), key.WithHelp("l", localizer.Text(i18n.MessageKeyLogs))),
+			shell:     key.NewBinding(key.WithKeys("s"), key.WithHelp("s", localizer.Text(i18n.MessageKeyShell))),
 		},
 		now:    time.Now,
 		ctx:    ctx,
@@ -435,6 +454,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.editing = true
 			}
 			return m, nil
+		case key.Matches(msg, m.keys.selectAll):
+			if m.editing {
+				m.toggleAllContainerSelection()
+			}
+			return m, nil
 		case key.Matches(msg, m.keys.selectRow):
 			if m.editing {
 				m.toggleSelection(m.selectedID)
@@ -445,7 +469,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.action = actionState{stage: actionMenu, targets: m.selectedTargets()}
 				return m, nil
 			}
-			return m.openDetails()
+			if !m.editing && m.selectedID != "" {
+				m.action = actionState{stage: actionMenu, targets: m.containerTargetsForIDs([]string{m.selectedID})}
+			}
+			return m, nil
+		case key.Matches(msg, m.keys.details):
+			if !m.editing {
+				return m.openDetails()
+			}
+			return m, nil
 		case key.Matches(msg, m.keys.logs):
 			return m.startLogs()
 		case key.Matches(msg, m.keys.shell):
@@ -489,8 +521,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			if !sameRunningImageReferences(m.snapshot, msg.snapshot) {
 				m.cancelImageUpdateScan()
+				m.containerUpdates = make(map[string]domain.UpdateStatus)
 			}
 			m.snapshot = m.service.Sort(msg.snapshot, m.sortMode)
+			m.prunePendingRecreates()
+			m.applyContainerUpdateStatuses()
 			m.stacks = m.service.RebuildStacks(m.snapshot)
 			m.stacksLoading, m.stacksLoaded, m.stacksErr = false, true, nil
 			m.syncStackSelection()
@@ -509,7 +544,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		resource := msg.resource
 		action := msg.action
 		targets := msg.targets
-		if resource == actionImages {
+		if resource == actionImages || isContainerUpdateAction(action) {
 			m.cancelImageUpdateScan()
 		}
 		if resource == actionImages && action == application.ActionPull {
@@ -517,6 +552,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if resource == actionImages && action == application.ActionRecreate {
 			m.clearRecreatedImages(targets, msg.results)
+		}
+		if isContainerUpdateAction(action) {
+			m.reconcileContainerUpdateResults(action, targets, msg.results)
 		}
 		m.action = actionState{}
 		m.showActionResult(msg.results)
@@ -557,6 +595,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshing = true
 			m.stacksGen++
 			m.stacksLoaded, m.stacksLoading, m.stacksErr = false, true, nil
+			if isContainerUpdateAction(action) {
+				m.imagesGen++
+				m.imagesLoaded, m.imagesLoading, m.imagesErr = false, true, nil
+				return m, tea.Batch(m.load(m.generation), m.loadStacks(m.stacksGen), m.loadImages(m.imagesGen), expireNotice)
+			}
 			return m, tea.Batch(m.load(m.generation), m.loadStacks(m.stacksGen), expireNotice)
 		}
 		if resource == actionStackContainers {
@@ -566,11 +609,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshing = true
 			m.stacksGen++
 			m.stacksLoaded, m.stacksLoading, m.stacksErr = false, true, nil
+			if isContainerUpdateAction(action) {
+				m.imagesGen++
+				m.imagesLoaded, m.imagesLoading, m.imagesErr = false, true, nil
+				return m, tea.Batch(m.load(m.generation), m.loadStacks(m.stacksGen), m.loadImages(m.imagesGen), expireNotice)
+			}
 			return m, tea.Batch(m.load(m.generation), m.loadStacks(m.stacksGen), expireNotice)
 		}
 		m.editing = false
 		m.clearSelection()
 		m.generation++
+		if isContainerUpdateAction(action) {
+			m.imagesGen++
+			m.imagesLoaded = false
+			m.imagesLoading = true
+			m.imagesErr = nil
+			return m, tea.Batch(m.load(m.generation), m.loadImages(m.imagesGen), expireNotice)
+		}
 		return m, tea.Batch(m.load(m.generation), expireNotice)
 	case actionNoticeExpiredMsg:
 		if msg.generation != m.noticeGeneration {
@@ -606,20 +661,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for id := range m.updatesChecking {
 			m.setImageUpdate(id, domain.UpdateUnknown)
 		}
+		if m.containerUpdates == nil {
+			m.containerUpdates = make(map[string]domain.UpdateStatus)
+		}
+		imageStatuses := make(map[string]domain.UpdateStatus)
 		for _, update := range msg.updates {
 			if update.Reason == application.DockerHubLoginRequiredReason {
 				m.dockerHubLoginChecked = true
 				m.dockerHubLoginConfigured = false
 			}
 			if update.Status == domain.UpdatePulledPendingRecreate {
-				m.recordPendingRecreates(update.ImageID)
-				m.setImageUpdate(update.ImageID, update.Status)
-			} else if !m.imagePendingRecreate(update.ImageID) {
-				m.setImageUpdate(update.ImageID, update.Status)
+				m.recordPendingRecreate(update)
+			}
+			if update.ContainerID != "" {
+				m.containerUpdates[update.ContainerID] = update.Status
+			}
+			imageStatuses[update.ImageID] = aggregateUpdateStatus(imageStatuses[update.ImageID], update.Status)
+		}
+		for imageID, status := range imageStatuses {
+			if !m.imagePendingRecreate(imageID) {
+				m.setImageUpdate(imageID, status)
 			}
 		}
 		m.updatesChecking = make(map[string]domain.UpdateStatus)
 		m.applyPendingImageStatuses()
+		m.applyContainerUpdateStatuses()
+		m.stacks = m.service.RebuildStacks(m.snapshot)
 		return m, scheduleImageUpdateRefresh(msg.generation, m.updates.Interval())
 	case imageUpdateRefreshMsg:
 		if msg.generation != m.updatesGeneration {
@@ -653,6 +720,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.images = preserveImageUpdates(m.images, msg.images)
 		m.imagesErr = msg.err
 		m.applyPendingImageStatuses()
+		m.applyContainerUpdateStatuses()
+		m.stacks = m.service.RebuildStacks(m.snapshot)
 		m.syncImageSelection()
 		return m, m.startImageUpdateScan()
 	case stacksLoadedMsg:
@@ -750,13 +819,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	layout := sharedui.ResolveLayout(m.width, m.height)
 	shell := sharedui.NewShell(sharedui.ShellOptions{
-		Title:       "dtop",
-		Subtitle:    m.headerSummary(),
-		ActiveView:  m.active,
-		Footer:      m.footer(layout),
-		AccentColor: m.accentColor,
-		Banner:      m.confirmationBanner(),
-		BannerColor: "33",
+		Title:        "dtop",
+		Localizer:    m.localizer,
+		Subtitle:     m.headerSummary(),
+		ActiveView:   m.active,
+		Footer:       m.footer(layout),
+		FooterNotice: m.dockerHubFooterNotice(),
+		AccentColor:  m.accentColor,
+		Banner:       m.confirmationBanner(),
+		BannerColor:  "33",
 		Views: []sharedui.View{
 			m.containersView(layout),
 			m.stacksView(layout),
@@ -775,6 +846,7 @@ func (m Model) View() string {
 }
 
 func (m Model) imagesView(layout sharedui.Layout) sharedui.View {
+	title := m.localizer.Text(i18n.MessageTabImages)
 	if m.action.resource == actionImages && m.action.stage == actionMenu {
 		return m.imagesActionView()
 	}
@@ -782,38 +854,39 @@ func (m Model) imagesView(layout sharedui.Layout) sharedui.View {
 		return m.imageDetailsView()
 	}
 	if m.imagesLoading || !m.imagesLoaded {
-		return sharedui.View{Title: "Images", Status: sharedui.StatusLoading, Summary: "Loading Docker images..."}
+		return sharedui.View{Title: title, Status: sharedui.StatusLoading, Summary: m.localizer.Text(i18n.MessageImagesLoading)}
 	}
 	if m.imagesErr != nil {
 		if len(m.images) > 0 {
-			return sharedui.View{Title: "Images", Status: sharedui.StatusWarning, Summary: "Showing last known images: " + m.imagesErr.Error(), Sections: []sharedui.Section{{Body: renderImagesWithColors(m.images, m.selectedImageID, m.selectedImages, m.imageEditing, layout, m.now(), m.accentColor, m.focusColor)}}}
+			return sharedui.View{Title: title, Status: sharedui.StatusWarning, Summary: m.localizer.Text(i18n.MessageImagesPartial) + m.imagesErr.Error(), Sections: []sharedui.Section{{Body: renderImagesLocalized(m.images, m.selectedImageID, m.selectedImages, m.imageEditing, layout, m.now(), m.accentColor, m.focusColor, m.localizer)}}}
 		}
 		return sharedui.View{
-			Title: "Images", Status: sharedui.StatusError, Summary: m.imagesErr.Error(),
-			Sections: []sharedui.Section{{Title: "Next", Body: "Press r to retry."}},
+			Title: title, Status: sharedui.StatusError, Summary: m.imagesErr.Error(),
+			Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageCommonRetry)}},
 		}
 	}
 	if len(m.images) == 0 {
-		return sharedui.View{Title: "Images", Status: sharedui.StatusEmpty, Summary: "No Docker images were found."}
+		return sharedui.View{Title: title, Status: sharedui.StatusEmpty, Summary: m.localizer.Text(i18n.MessageImagesEmpty)}
 	}
 	return sharedui.View{
-		Title: "Images", Status: sharedui.StatusReady, HideStatus: true,
-		Sections: []sharedui.Section{{Body: renderImagesWithColors(m.images, m.selectedImageID, m.selectedImages, m.imageEditing, layout, m.now(), m.accentColor, m.focusColor)}},
+		Title: title, Status: sharedui.StatusReady, HideStatus: true,
+		Sections: []sharedui.Section{{Body: renderImagesLocalized(m.images, m.selectedImageID, m.selectedImages, m.imageEditing, layout, m.now(), m.accentColor, m.focusColor, m.localizer)}},
 	}
 }
 
 func (m Model) imageDetailsView() sharedui.View {
+	title := m.localizer.Text(i18n.MessageImageDetailsTitle)
 	if m.imageDetailLoading {
-		return sharedui.View{Title: "Image details", Status: sharedui.StatusLoading, Summary: "Loading image details..."}
+		return sharedui.View{Title: title, Status: sharedui.StatusLoading, Summary: m.localizer.Text(i18n.MessageImageDetailsLoad)}
 	}
 	if m.imageDetailErr != nil {
 		return sharedui.View{
-			Title: "Image details", Status: sharedui.StatusError, Summary: m.imageDetailErr.Error(),
-			Sections: []sharedui.Section{{Title: "Controls", Body: "esc back"}},
+			Title: title, Status: sharedui.StatusError, Summary: m.imageDetailErr.Error(),
+			Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageCommonBack)}},
 		}
 	}
 	details := m.imageDetails
-	tags := "<untagged>"
+	tags := m.localizer.Text(i18n.MessageCommonUntagged)
 	if len(details.Tags) > 0 {
 		tags = strings.Join(details.Tags, "\n")
 	}
@@ -822,81 +895,85 @@ func (m Model) imageDetailsView() sharedui.View {
 		digests = strings.Join(details.Digests, "\n")
 	}
 	return sharedui.View{
-		Title: "Image details", Status: sharedui.StatusReady, HideStatus: true,
+		Title: title, Status: sharedui.StatusReady, HideStatus: true,
 		Sections: []sharedui.Section{
-			{Title: shortContainerID(details.ID), Body: strings.Join([]string{"Size: " + formatBytes(details.Size), "Created: " + formatImageAge(details.Created, m.now()), "Platform: " + details.OS + "/" + details.Architecture}, "\n")},
-			{Title: "Tags", Body: tags},
-			{Title: "Digests", Body: digests},
-			{Title: "Controls", Body: "esc back"},
+			{Title: shortContainerID(details.ID), Body: strings.Join([]string{m.localizer.Text(i18n.MessageImageDetailsSize, formatBytes(details.Size)), m.localizer.Text(i18n.MessageImageDetailsCreate, formatImageAge(details.Created, m.now())), m.localizer.Text(i18n.MessageImageDetailsPlat, details.OS+"/"+details.Architecture)}, "\n")},
+			{Title: m.localizer.Text(i18n.MessageSectionTags), Body: tags},
+			{Title: m.localizer.Text(i18n.MessageSectionDigests), Body: digests},
+			{Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageCommonBack)},
 		},
 	}
 }
 
 func (m Model) networksView(layout sharedui.Layout) sharedui.View {
+	title := m.localizer.Text(i18n.MessageTabNetworks)
 	if m.networkDetailOpen {
 		return m.networkDetailsView()
 	}
 	if m.networksLoading || !m.networksLoaded {
-		return sharedui.View{Title: "Networks", Status: sharedui.StatusLoading, Summary: "Loading Docker networks..."}
+		return sharedui.View{Title: title, Status: sharedui.StatusLoading, Summary: m.localizer.Text(i18n.MessageNetworksLoading)}
 	}
 	if m.networksErr != nil {
 		if len(m.networks) > 0 {
-			return sharedui.View{Title: "Networks", Status: sharedui.StatusWarning, Summary: "Showing last known networks: " + m.networksErr.Error(), Sections: []sharedui.Section{{Body: renderNetworksWithColors(m.networks, m.selectedNetworkID, m.selectedNetworks, m.networkEditing, layout, m.now(), m.accentColor, m.focusColor)}}}
+			return sharedui.View{Title: title, Status: sharedui.StatusWarning, Summary: m.localizer.Text(i18n.MessageNetworksPartial) + m.networksErr.Error(), Sections: []sharedui.Section{{Body: renderNetworksLocalized(m.networks, m.selectedNetworkID, m.selectedNetworks, m.networkEditing, layout, m.now(), m.accentColor, m.focusColor, m.localizer)}}}
 		}
-		return sharedui.View{Title: "Networks", Status: sharedui.StatusError, Summary: m.networksErr.Error(), Sections: []sharedui.Section{{Title: "Next", Body: "Press r to retry."}}}
+		return sharedui.View{Title: title, Status: sharedui.StatusError, Summary: m.networksErr.Error(), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageCommonRetry)}}}
 	}
 	if len(m.networks) == 0 {
-		return sharedui.View{Title: "Networks", Status: sharedui.StatusEmpty, Summary: "No Docker networks were found."}
+		return sharedui.View{Title: title, Status: sharedui.StatusEmpty, Summary: m.localizer.Text(i18n.MessageNetworksEmpty)}
 	}
 	if m.action.resource == actionNetworks && m.action.stage == actionMenu {
 		return m.actionView()
 	}
-	return sharedui.View{Title: "Networks", Status: sharedui.StatusReady, HideStatus: true, Sections: []sharedui.Section{{Body: renderNetworksWithColors(m.networks, m.selectedNetworkID, m.selectedNetworks, m.networkEditing, layout, m.now(), m.accentColor, m.focusColor)}}}
+	return sharedui.View{Title: title, Status: sharedui.StatusReady, HideStatus: true, Sections: []sharedui.Section{{Body: renderNetworksLocalized(m.networks, m.selectedNetworkID, m.selectedNetworks, m.networkEditing, layout, m.now(), m.accentColor, m.focusColor, m.localizer)}}}
 }
 
 func (m Model) networkDetailsView() sharedui.View {
+	title := m.localizer.Text(i18n.MessageNetworkDetailsTitle)
 	if m.networkDetailLoading {
-		return sharedui.View{Title: "Network details", Status: sharedui.StatusLoading, Summary: "Loading network details..."}
+		return sharedui.View{Title: title, Status: sharedui.StatusLoading, Summary: m.localizer.Text(i18n.MessageNetworkDetailsLoad)}
 	}
 	if m.networkDetailErr != nil {
-		return sharedui.View{Title: "Network details", Status: sharedui.StatusError, Summary: m.networkDetailErr.Error(), Sections: []sharedui.Section{{Title: "Controls", Body: "esc back"}}}
+		return sharedui.View{Title: title, Status: sharedui.StatusError, Summary: m.networkDetailErr.Error(), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageCommonBack)}}}
 	}
 	details := m.networkDetails
 	containers := "-"
 	if len(details.Containers) > 0 {
 		containers = strings.Join(details.Containers, "\n")
 	}
-	return sharedui.View{Title: "Network details", Status: sharedui.StatusReady, HideStatus: true, Sections: []sharedui.Section{{Title: details.Name, Body: strings.Join([]string{"ID: " + shortContainerID(details.ID), "Driver: " + details.Driver, "Scope: " + details.Scope, "Created: " + formatImageAge(details.Created, m.now()), "Internal: " + yesNo(details.Internal), "Attachable: " + yesNo(details.Attachable)}, "\n")}, {Title: "Containers", Body: containers}, {Title: "Controls", Body: "esc back"}}}
+	return sharedui.View{Title: title, Status: sharedui.StatusReady, HideStatus: true, Sections: []sharedui.Section{{Title: details.Name, Body: strings.Join([]string{m.localizer.Text(i18n.MessageDetailsID, shortContainerID(details.ID)), m.localizer.Text(i18n.MessageDetailsDriver, details.Driver), m.localizer.Text(i18n.MessageDetailsScope, details.Scope), m.localizer.Text(i18n.MessageDetailsCreated, formatImageAge(details.Created, m.now())), m.localizer.Text(i18n.MessageDetailsInternal, yesNoLocalized(details.Internal, m.localizer)), m.localizer.Text(i18n.MessageDetailsAttachable, yesNoLocalized(details.Attachable, m.localizer))}, "\n")}, {Title: m.localizer.Text(i18n.MessageSectionContainers), Body: containers}, {Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageCommonBack)}}}
 }
 
 func (m Model) volumesView(layout sharedui.Layout) sharedui.View {
+	title := m.localizer.Text(i18n.MessageTabVolumes)
 	if m.volumeDetailOpen {
 		return m.volumeDetailsView()
 	}
 	if m.volumesLoading || !m.volumesLoaded {
-		return sharedui.View{Title: "Volumes", Status: sharedui.StatusLoading, Summary: "Loading Docker volumes..."}
+		return sharedui.View{Title: title, Status: sharedui.StatusLoading, Summary: m.localizer.Text(i18n.MessageVolumesLoading)}
 	}
 	if m.volumesErr != nil {
 		if len(m.volumes) > 0 {
-			return sharedui.View{Title: "Volumes", Status: sharedui.StatusWarning, Summary: "Showing last known volumes: " + m.volumesErr.Error(), Sections: []sharedui.Section{{Body: renderVolumesWithColors(m.volumes, m.selectedVolumeName, m.selectedVolumes, m.volumeEditing, layout, m.now(), m.accentColor, m.focusColor)}}}
+			return sharedui.View{Title: title, Status: sharedui.StatusWarning, Summary: m.localizer.Text(i18n.MessageVolumesPartial) + m.volumesErr.Error(), Sections: []sharedui.Section{{Body: renderVolumesLocalized(m.volumes, m.selectedVolumeName, m.selectedVolumes, m.volumeEditing, layout, m.now(), m.accentColor, m.focusColor, m.localizer)}}}
 		}
-		return sharedui.View{Title: "Volumes", Status: sharedui.StatusError, Summary: m.volumesErr.Error(), Sections: []sharedui.Section{{Title: "Next", Body: "Press r to retry."}}}
+		return sharedui.View{Title: title, Status: sharedui.StatusError, Summary: m.volumesErr.Error(), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageCommonRetry)}}}
 	}
 	if len(m.volumes) == 0 {
-		return sharedui.View{Title: "Volumes", Status: sharedui.StatusEmpty, Summary: "No Docker volumes were found."}
+		return sharedui.View{Title: title, Status: sharedui.StatusEmpty, Summary: m.localizer.Text(i18n.MessageVolumesEmpty)}
 	}
 	if m.action.resource == actionVolumes && m.action.stage == actionMenu {
 		return m.actionView()
 	}
-	return sharedui.View{Title: "Volumes", Status: sharedui.StatusReady, HideStatus: true, Sections: []sharedui.Section{{Body: renderVolumesWithColors(m.volumes, m.selectedVolumeName, m.selectedVolumes, m.volumeEditing, layout, m.now(), m.accentColor, m.focusColor)}}}
+	return sharedui.View{Title: title, Status: sharedui.StatusReady, HideStatus: true, Sections: []sharedui.Section{{Body: renderVolumesLocalized(m.volumes, m.selectedVolumeName, m.selectedVolumes, m.volumeEditing, layout, m.now(), m.accentColor, m.focusColor, m.localizer)}}}
 }
 
 func (m Model) volumeDetailsView() sharedui.View {
+	title := m.localizer.Text(i18n.MessageVolumeDetailsTitle)
 	if m.volumeDetailLoading {
-		return sharedui.View{Title: "Volume details", Status: sharedui.StatusLoading, Summary: "Loading volume details..."}
+		return sharedui.View{Title: title, Status: sharedui.StatusLoading, Summary: m.localizer.Text(i18n.MessageVolumeDetailsLoad)}
 	}
 	if m.volumeDetailErr != nil {
-		return sharedui.View{Title: "Volume details", Status: sharedui.StatusError, Summary: m.volumeDetailErr.Error(), Sections: []sharedui.Section{{Title: "Controls", Body: "esc back"}}}
+		return sharedui.View{Title: title, Status: sharedui.StatusError, Summary: m.volumeDetailErr.Error(), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageCommonBack)}}}
 	}
 	details := m.volumeDetails
 	options := "-"
@@ -908,7 +985,7 @@ func (m Model) volumeDetailsView() sharedui.View {
 		sort.Strings(lines)
 		options = strings.Join(lines, "\n")
 	}
-	return sharedui.View{Title: "Volume details", Status: sharedui.StatusReady, HideStatus: true, Sections: []sharedui.Section{{Title: details.Name, Body: strings.Join([]string{"Driver: " + details.Driver, "Scope: " + details.Scope, "Mountpoint: " + details.Mountpoint, "Created: " + formatImageAge(details.Created, m.now())}, "\n")}, {Title: "Options", Body: options}, {Title: "Controls", Body: "esc back"}}}
+	return sharedui.View{Title: title, Status: sharedui.StatusReady, HideStatus: true, Sections: []sharedui.Section{{Title: details.Name, Body: strings.Join([]string{m.localizer.Text(i18n.MessageDetailsDriver, details.Driver), m.localizer.Text(i18n.MessageDetailsScope, details.Scope), m.localizer.Text(i18n.MessageDetailsMountpoint, details.Mountpoint), m.localizer.Text(i18n.MessageDetailsCreated, formatImageAge(details.Created, m.now()))}, "\n")}, {Title: m.localizer.Text(i18n.MessageSectionOptions), Body: options}, {Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageCommonBack)}}}
 }
 
 func (m Model) load(generation uint64) tea.Cmd {
@@ -1180,6 +1257,12 @@ func (m Model) updateStacks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if m.stackEditing {
 			m.toggleStackSelection(m.selectedStackName)
 		}
+	case key.Matches(msg, m.keys.selectAll):
+		if m.stackContainerEditing {
+			m.toggleAllStackContainerSelection()
+		} else if m.stackEditing {
+			m.toggleAllStackSelection()
+		}
 	case key.Matches(msg, m.keys.retry):
 		m.stacksGen++
 		m.stacksLoading, m.stacksErr = true, nil
@@ -1273,6 +1356,11 @@ func (m Model) updateImages(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.toggleImageSelection(m.selectedImageID)
 		}
 		return m, nil
+	case key.Matches(msg, m.keys.selectAll):
+		if m.imageEditing && !m.imageDetailOpen {
+			m.toggleAllImageSelection()
+		}
+		return m, nil
 	case key.Matches(msg, m.keys.retry):
 		if m.imageDetailOpen {
 			return m, nil
@@ -1301,6 +1389,21 @@ func (m Model) updateImages(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.action = actionState{stage: actionMenu, resource: actionImages, targets: m.selectedImageTargetsForIDs([]string{m.selectedImageID})}
 		return m, nil
+	case key.Matches(msg, m.keys.details):
+		if m.imageDetailOpen || m.imageEditing || m.selectedImageID == "" {
+			return m, nil
+		}
+		m.imageDetailOpen = true
+		m.imageDetailLoading = true
+		m.imageDetailErr = nil
+		m.imageDetails = domain.ImageDetails{}
+		id := m.selectedImageID
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
+			defer cancel()
+			details, err := m.service.ImageDetails(ctx, id)
+			return imageDetailsLoadedMsg{details: details, err: err}
+		}
 	}
 	return m, nil
 }
@@ -1352,6 +1455,10 @@ func (m Model) updateNetworks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.networkEditing && !m.networkDetailOpen {
 			m.toggleNetworkSelection(m.selectedNetworkID)
 		}
+	case key.Matches(msg, m.keys.selectAll):
+		if m.networkEditing && !m.networkDetailOpen {
+			m.toggleAllNetworkSelection()
+		}
 	case key.Matches(msg, m.keys.retry):
 		if !m.networkDetailOpen {
 			m.networksGen++
@@ -1374,15 +1481,18 @@ func (m Model) updateNetworks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.action = actionState{stage: actionMenu, resource: actionNetworks, targets: m.selectedNetworkTargets()}
 			return m, nil
 		}
-		if !m.networkDetailOpen {
-			m.networkDetailOpen, m.networkDetailLoading, m.networkDetailErr, m.networkDetails = true, true, nil, domain.NetworkDetails{}
-			id := m.selectedNetworkID
-			return m, func() tea.Msg {
-				ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
-				defer cancel()
-				details, err := m.service.NetworkDetails(ctx, id)
-				return networkDetailsLoadedMsg{details: details, err: err}
-			}
+		m.action = actionState{stage: actionMenu, resource: actionNetworks, targets: m.networkTargetsForIDs([]string{m.selectedNetworkID})}
+	case key.Matches(msg, m.keys.details):
+		if m.networkDetailOpen || m.networkEditing || m.selectedNetworkID == "" {
+			return m, nil
+		}
+		m.networkDetailOpen, m.networkDetailLoading, m.networkDetailErr, m.networkDetails = true, true, nil, domain.NetworkDetails{}
+		id := m.selectedNetworkID
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
+			defer cancel()
+			details, err := m.service.NetworkDetails(ctx, id)
+			return networkDetailsLoadedMsg{details: details, err: err}
 		}
 	}
 	return m, nil
@@ -1474,6 +1584,10 @@ func (m Model) updateVolumes(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.volumeEditing && !m.volumeDetailOpen {
 			m.toggleVolumeSelection(m.selectedVolumeName)
 		}
+	case key.Matches(msg, m.keys.selectAll):
+		if m.volumeEditing && !m.volumeDetailOpen {
+			m.toggleAllVolumeSelection()
+		}
 	case key.Matches(msg, m.keys.retry):
 		if !m.volumeDetailOpen {
 			m.volumesGen++
@@ -1496,15 +1610,18 @@ func (m Model) updateVolumes(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.action = actionState{stage: actionMenu, resource: actionVolumes, targets: m.selectedVolumeTargets()}
 			return m, nil
 		}
-		if !m.volumeDetailOpen {
-			m.volumeDetailOpen, m.volumeDetailLoading, m.volumeDetailErr, m.volumeDetails = true, true, nil, domain.VolumeDetails{}
-			name := m.selectedVolumeName
-			return m, func() tea.Msg {
-				ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
-				defer cancel()
-				details, err := m.service.VolumeDetails(ctx, name)
-				return volumeDetailsLoadedMsg{details: details, err: err}
-			}
+		m.action = actionState{stage: actionMenu, resource: actionVolumes, targets: m.volumeTargetsForNames([]string{m.selectedVolumeName})}
+	case key.Matches(msg, m.keys.details):
+		if m.volumeDetailOpen || m.volumeEditing || m.selectedVolumeName == "" {
+			return m, nil
+		}
+		m.volumeDetailOpen, m.volumeDetailLoading, m.volumeDetailErr, m.volumeDetails = true, true, nil, domain.VolumeDetails{}
+		name := m.selectedVolumeName
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
+			defer cancel()
+			details, err := m.service.VolumeDetails(ctx, name)
+			return volumeDetailsLoadedMsg{details: details, err: err}
 		}
 	}
 	return m, nil
@@ -1617,6 +1734,13 @@ func (m *Model) syncStackSelection() {
 }
 
 func (m *Model) clearStackSelection() { m.selectedStacks = make(map[string]struct{}) }
+func (m *Model) toggleAllStackSelection() {
+	ids := make([]string, 0, len(m.stacks))
+	for _, stack := range m.stacks {
+		ids = append(ids, stack.Name)
+	}
+	toggleAll(&m.selectedStacks, ids)
+}
 func (m *Model) toggleStackSelection(name string) {
 	if name == "" {
 		return
@@ -1631,7 +1755,8 @@ func (m Model) selectedStackTargets() []actionTarget {
 	targets := make([]actionTarget, 0, len(m.selectedStacks))
 	for _, stack := range m.stacks {
 		if _, selected := m.selectedStacks[stack.Name]; selected {
-			targets = append(targets, actionTarget{ID: stack.Name, Name: stack.Name, State: stack.State, Unavailable: stack.DownUnavailableReason()})
+			stackCopy := stack
+			targets = append(targets, actionTarget{ID: stack.Name, Name: stack.Name, State: stack.State, Update: stackUpdateStatus(stack), Unavailable: stack.DownUnavailableReason(), Stack: &stackCopy})
 		}
 	}
 	return targets
@@ -1683,6 +1808,15 @@ func (m Model) selectedStack() *domain.Stack {
 }
 
 func (m *Model) clearStackContainerSelection() { m.selectedStackContainers = make(map[string]struct{}) }
+func (m *Model) toggleAllStackContainerSelection() {
+	ids := make([]string, 0)
+	if stack := m.selectedStack(); stack != nil && stack.Name == m.expandedStackName {
+		for _, container := range stack.ContainerItems {
+			ids = append(ids, container.ID)
+		}
+	}
+	toggleAll(&m.selectedStackContainers, ids)
+}
 func (m *Model) toggleStackContainerSelection(id string) {
 	if _, selected := m.selectedStackContainers[id]; selected {
 		delete(m.selectedStackContainers, id)
@@ -1706,7 +1840,8 @@ func (m Model) selectedStackContainerTargetsForIDs(ids []string) []actionTarget 
 	if stack := m.selectedStack(); stack != nil {
 		for _, container := range stack.ContainerItems {
 			if _, ok := selected[container.ID]; ok {
-				targets = append(targets, actionTarget{ID: container.ID, Name: container.Name, State: container.State})
+				stackCopy := *stack
+				targets = append(targets, actionTarget{ID: container.ID, Name: container.Name, State: container.State, ImageID: container.ImageID, Update: container.Update, Stack: &stackCopy, Service: container.ComposeService})
 			}
 		}
 	}
@@ -1717,8 +1852,24 @@ func (m *Model) clearImageSelection() {
 	m.selectedImages = make(map[string]struct{})
 }
 
+func (m *Model) toggleAllImageSelection() {
+	ids := make([]string, 0, len(m.images))
+	for _, image := range m.images {
+		ids = append(ids, image.ID)
+	}
+	toggleAll(&m.selectedImages, ids)
+}
+
 func (m *Model) clearNetworkSelection() {
 	m.selectedNetworks = make(map[string]struct{})
+}
+
+func (m *Model) toggleAllNetworkSelection() {
+	ids := make([]string, 0, len(m.networks))
+	for _, network := range m.networks {
+		ids = append(ids, network.ID)
+	}
+	toggleAll(&m.selectedNetworks, ids)
 }
 
 func (m *Model) toggleNetworkSelection(id string) {
@@ -1733,9 +1884,21 @@ func (m *Model) toggleNetworkSelection(id string) {
 }
 
 func (m Model) selectedNetworkTargets() []actionTarget {
-	targets := make([]actionTarget, 0, len(m.selectedNetworks))
+	ids := make([]string, 0, len(m.selectedNetworks))
+	for id := range m.selectedNetworks {
+		ids = append(ids, id)
+	}
+	return m.networkTargetsForIDs(ids)
+}
+
+func (m Model) networkTargetsForIDs(ids []string) []actionTarget {
+	selected := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		selected[id] = struct{}{}
+	}
+	targets := make([]actionTarget, 0, len(ids))
 	for _, network := range m.networks {
-		if _, selected := m.selectedNetworks[network.ID]; selected {
+		if _, found := selected[network.ID]; found {
 			targets = append(targets, actionTarget{ID: network.ID, Name: network.Name})
 		}
 	}
@@ -1744,6 +1907,14 @@ func (m Model) selectedNetworkTargets() []actionTarget {
 
 func (m *Model) clearVolumeSelection() {
 	m.selectedVolumes = make(map[string]struct{})
+}
+
+func (m *Model) toggleAllVolumeSelection() {
+	ids := make([]string, 0, len(m.volumes))
+	for _, volume := range m.volumes {
+		ids = append(ids, volume.Name)
+	}
+	toggleAll(&m.selectedVolumes, ids)
 }
 
 func (m *Model) toggleVolumeSelection(name string) {
@@ -1758,9 +1929,21 @@ func (m *Model) toggleVolumeSelection(name string) {
 }
 
 func (m Model) selectedVolumeTargets() []actionTarget {
-	targets := make([]actionTarget, 0, len(m.selectedVolumes))
+	names := make([]string, 0, len(m.selectedVolumes))
+	for name := range m.selectedVolumes {
+		names = append(names, name)
+	}
+	return m.volumeTargetsForNames(names)
+}
+
+func (m Model) volumeTargetsForNames(names []string) []actionTarget {
+	selected := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		selected[name] = struct{}{}
+	}
+	targets := make([]actionTarget, 0, len(names))
 	for _, volume := range m.volumes {
-		if _, selected := m.selectedVolumes[volume.Name]; selected {
+		if _, found := selected[volume.Name]; found {
 			targets = append(targets, actionTarget{ID: volume.Name, Name: volume.Name})
 		}
 	}
@@ -2010,7 +2193,7 @@ func (m Model) updateConfirmation(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && (msg.Runes[0] == 'y' || msg.Runes[0] == 'Y') {
+	if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && (msg.Runes[0] == 'y' || msg.Runes[0] == 'Y' || msg.Runes[0] == 's' || msg.Runes[0] == 'S') {
 		m.action.running = true
 		m.noticeGeneration++
 		return m, m.runAction(m.selectedAction())
@@ -2028,8 +2211,12 @@ func (m Model) runAction(action application.Action) tea.Cmd {
 	targets := append([]actionTarget(nil), m.action.targets...)
 	resource := m.action.resource
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 45*time.Second)
-		defer cancel()
+		ctx := m.ctx
+		if !isContainerUpdateAction(action) {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(m.ctx, 45*time.Second)
+			defer cancel()
+		}
 
 		ids := make([]string, 0, len(targets))
 		for _, target := range targets {
@@ -2064,6 +2251,9 @@ func (m Model) runAction(action application.Action) tea.Cmd {
 		if resource == actionStacks {
 			stacks := make([]domain.Stack, 0, len(targets))
 			for _, target := range targets {
+				if isContainerUpdateAction(action) && !targetUpdateEligible(action, target) {
+					continue
+				}
 				for _, stack := range m.stacks {
 					if stack.Name == target.ID {
 						stacks = append(stacks, stack)
@@ -2072,6 +2262,12 @@ func (m Model) runAction(action application.Action) tea.Cmd {
 				}
 			}
 			return finished(m.service.ActStacks(ctx, action, stacks))
+		}
+		if resource == actionStackContainers && isContainerUpdateAction(action) {
+			return finished(m.runComposeContainerUpdate(ctx, action, targets))
+		}
+		if resource == actionContainers && isContainerUpdateAction(action) {
+			return finished(m.runContainerUpdate(ctx, action, targets))
 		}
 		return finished(m.service.Act(ctx, action, ids))
 	}
@@ -2085,23 +2281,73 @@ func (m Model) actionMenuView() sharedui.View {
 		width = 20
 	}
 	for index, choice := range choices {
-		line := "  " + actionLabelForResource(choice, m.action.resource)
+		line := "  " + actionLabelForResourceLocalized(choice, m.action.resource, m.localizer)
 		if index == m.action.index {
-			line = focusedMenuRow("> "+actionLabelForResource(choice, m.action.resource), width, m.focusColor, m.accentColor)
+			line = focusedMenuRow("> "+actionLabelForResourceLocalized(choice, m.action.resource, m.localizer), width, m.focusColor, m.accentColor)
 		}
 		lines = append(lines, line)
 	}
 
 	return sharedui.View{
-		Title:      actionResourceLabel(m.action.resource),
+		Title:      actionResourceLabelLocalized(m.action.resource, m.localizer),
 		Status:     sharedui.StatusWarning,
 		HideStatus: true,
-		Sections: []sharedui.Section{
-			{Title: fmt.Sprintf("Selected: %d %s", len(m.action.targets), strings.ToLower(actionResourceLabel(m.action.resource))), Body: strings.Join(m.targetNames(m.action.targets), "\n")},
-			{Title: "Action", Body: strings.Join(lines, "\n")},
-			{Title: "Controls", Body: "up/down choose | enter continue | esc cancel"},
-		},
+		Sections: append([]sharedui.Section{
+			{Title: m.localizer.Text(i18n.MessageActionSelected, m.actionResourceCount(len(m.action.targets))), Body: strings.Join(m.targetNames(m.action.targets), "\n")},
+		}, m.actionMenuSections(lines)...),
 	}
+}
+
+func (m Model) actionMenuSections(lines []string) []sharedui.Section {
+	sections := []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionAction), Body: strings.Join(lines, "\n")}}
+	if m.action.resource == actionContainers || m.action.resource == actionStackContainers || m.action.resource == actionStacks {
+		eligible := 0
+		for _, target := range m.action.targets {
+			if targetUpdateEligible(m.selectedAction(), target) {
+				eligible++
+			}
+		}
+		if eligible > 0 && eligible < len(m.action.targets) {
+			sections = append(sections, sharedui.Section{Title: m.localizer.Text(i18n.MessageSectionUpdateEligibility), Body: m.localizer.Text(i18n.MessageActionEligibility, eligible, len(m.action.targets)-eligible)})
+		}
+	}
+	return append(sections, sharedui.Section{Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageActionControls)})
+}
+
+func isContainerUpdateAction(action application.Action) bool {
+	return action == application.ActionPull || action == application.ActionUpdate || action == application.ActionApply
+}
+
+func targetUpdateEligible(action application.Action, target actionTarget) bool {
+	if target.Stack != nil && target.Stack.DownUnavailableReason() != "" {
+		return false
+	}
+	switch action {
+	case application.ActionPull, application.ActionUpdate:
+		return target.Update == domain.UpdateAvailable && (target.Stack != nil || len(target.Recreate) > 0)
+	case application.ActionApply:
+		return target.Update == domain.UpdatePulledPendingRecreate && (target.Stack != nil || len(target.Recreate) > 0)
+	default:
+		return false
+	}
+}
+
+func (m Model) anyEligibleTarget(action application.Action) bool {
+	for _, target := range m.action.targets {
+		if targetUpdateEligible(action, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func anyTargetStatus(targets []actionTarget, status domain.UpdateStatus) bool {
+	for _, target := range targets {
+		if target.Update == status && target.Stack != nil && target.Stack.DownUnavailableReason() == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Model) toggleSelection(id string) {
@@ -2119,14 +2365,139 @@ func (m *Model) clearSelection() {
 	m.selected = make(map[string]struct{})
 }
 
+func (m *Model) toggleAllContainerSelection() {
+	ids := make([]string, 0, len(m.snapshot.Containers))
+	for _, container := range m.snapshot.Containers {
+		ids = append(ids, container.ID)
+	}
+	toggleAll(&m.selected, ids)
+}
+
+func toggleAll(selection *map[string]struct{}, ids []string) {
+	if *selection == nil {
+		*selection = make(map[string]struct{})
+	}
+	allSelected := len(ids) > 0
+	for _, id := range ids {
+		if _, selected := (*selection)[id]; !selected {
+			allSelected = false
+			break
+		}
+	}
+	if allSelected {
+		*selection = make(map[string]struct{})
+		return
+	}
+	selected := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		selected[id] = struct{}{}
+	}
+	*selection = selected
+}
+
 func (m Model) selectedTargets() []actionTarget {
 	targets := make([]actionTarget, 0, len(m.selected))
 	for _, container := range m.snapshot.Containers {
 		if _, selected := m.selected[container.ID]; selected {
-			targets = append(targets, actionTarget{ID: container.ID, Name: container.Name, State: container.State})
+			targets = append(targets, m.containerActionTarget(container))
 		}
 	}
 
+	return targets
+}
+
+func (m Model) containerActionTarget(container domain.Container) actionTarget {
+	target := actionTarget{ID: container.ID, Name: container.Name, State: container.State, ImageID: container.ImageID, Update: container.Update}
+	if container.ComposeProject != "" {
+		for _, stack := range m.stacks {
+			if stack.Name == container.ComposeProject {
+				stackCopy := stack
+				target.Stack = &stackCopy
+				break
+			}
+		}
+		target.Service = container.ComposeService
+		return target
+	}
+	if container.Update == domain.UpdateAvailable {
+		target.PullRefs = []string{container.Image}
+		target.Recreate = []application.RecreateTarget{{ID: container.ID, Reference: container.Image}}
+	}
+	if pending, found := m.pendingRecreates[container.ID]; found && !pending.Compose {
+		target.Update = domain.UpdatePulledPendingRecreate
+		target.Recreate = []application.RecreateTarget{{ID: container.ID, Reference: pending.Reference}}
+	}
+	return target
+}
+
+func (m Model) runContainerUpdate(ctx context.Context, action application.Action, targets []actionTarget) []application.ActionResult {
+	direct := m.containerUpdateTargets(action, targets)
+	results := m.runDirectContainerUpdate(ctx, action, direct)
+	return append(results, m.runComposeContainerUpdate(ctx, action, targets)...)
+}
+
+func (m Model) runDirectContainerUpdate(ctx context.Context, action application.Action, targets []application.RecreateTarget) []application.ActionResult {
+	switch action {
+	case application.ActionPull:
+		return m.service.PullContainerUpdates(ctx, targets)
+	case application.ActionUpdate:
+		return m.service.UpdateContainers(ctx, targets)
+	default:
+		return m.service.ApplyContainerUpdates(ctx, targets)
+	}
+}
+
+func (m Model) runComposeContainerUpdate(ctx context.Context, action application.Action, targets []actionTarget) []application.ActionResult {
+	byStack := make(map[string]*application.StackUpdateTarget)
+	services := make(map[string]map[string]struct{})
+	for _, target := range targets {
+		if target.Stack == nil || !targetUpdateEligible(action, target) {
+			continue
+		}
+		update := byStack[target.Stack.Name]
+		if update == nil {
+			update = &application.StackUpdateTarget{Stack: *target.Stack}
+			byStack[target.Stack.Name] = update
+			services[target.Stack.Name] = make(map[string]struct{})
+		}
+		if target.Service != "" {
+			services[target.Stack.Name][target.Service] = struct{}{}
+		}
+	}
+	updates := make([]application.StackUpdateTarget, 0, len(byStack))
+	for name, update := range byStack {
+		for service := range services[name] {
+			update.Services = append(update.Services, service)
+		}
+		sort.Strings(update.Services)
+		updates = append(updates, *update)
+	}
+	sort.Slice(updates, func(i, j int) bool { return updates[i].Stack.Name < updates[j].Stack.Name })
+	return m.service.UpdateStackServices(ctx, action, updates)
+}
+
+func (m Model) containerUpdateTargets(action application.Action, targets []actionTarget) []application.RecreateTarget {
+	result := make([]application.RecreateTarget, 0, len(targets))
+	for _, target := range targets {
+		if target.Stack != nil || !targetUpdateEligible(action, target) {
+			continue
+		}
+		result = append(result, target.Recreate...)
+	}
+	return result
+}
+
+func (m Model) containerTargetsForIDs(ids []string) []actionTarget {
+	selected := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		selected[id] = struct{}{}
+	}
+	targets := make([]actionTarget, 0, len(ids))
+	for _, container := range m.snapshot.Containers {
+		if _, found := selected[container.ID]; found {
+			targets = append(targets, m.containerActionTarget(container))
+		}
+	}
 	return targets
 }
 
@@ -2174,6 +2545,13 @@ func stackActionChoices(targets []actionTarget) []application.Action {
 	if len(targets) == 0 {
 		return []application.Action{"cancel"}
 	}
+	choices := []application.Action{}
+	if anyTargetStatus(targets, domain.UpdateAvailable) {
+		choices = append(choices, application.ActionPull, application.ActionUpdate)
+	}
+	if anyTargetStatus(targets, domain.UpdatePulledPendingRecreate) {
+		choices = append(choices, application.ActionApply)
+	}
 	available := func() bool {
 		for _, target := range targets {
 			if target.Unavailable != "" {
@@ -2183,24 +2561,25 @@ func stackActionChoices(targets []actionTarget) []application.Action {
 		return true
 	}
 	if !available() {
-		return []application.Action{"cancel"}
+		return append(choices, "cancel")
 	}
 	state := strings.ToLower(targets[0].State)
 	for _, target := range targets[1:] {
 		if strings.ToLower(target.State) != state {
-			return []application.Action{"cancel"}
+			return append(choices, "cancel")
 		}
 	}
 	switch state {
 	case "down", "missing compose file":
-		return []application.Action{application.ActionUp, "cancel"}
+		choices = append(choices, application.ActionUp)
 	case "running", "mixed":
-		return []application.Action{application.ActionStop, application.ActionRestart, application.ActionDown, "cancel"}
+		choices = append(choices, application.ActionStop, application.ActionRestart, application.ActionDown)
 	case "stopped":
-		return []application.Action{application.ActionUp, application.ActionRestart, application.ActionDown, "cancel"}
+		choices = append(choices, application.ActionUp, application.ActionRestart, application.ActionDown)
 	default:
 		return []application.Action{"cancel"}
 	}
+	return append(choices, "cancel")
 }
 
 func (m Model) actionChoices() []application.Action {
@@ -2215,6 +2594,20 @@ func (m Model) actionChoices() []application.Action {
 				return []application.Action{application.ActionPull, application.ActionDelete, "cancel"}
 			}
 		}
+	}
+	if m.action.resource == actionContainers || m.action.resource == actionStackContainers {
+		choices := make([]application.Action, 0, 7)
+		if m.anyEligibleTarget(application.ActionPull) {
+			choices = append(choices, application.ActionPull)
+		}
+		if m.anyEligibleTarget(application.ActionUpdate) {
+			choices = append(choices, application.ActionUpdate)
+		}
+		if m.anyEligibleTarget(application.ActionApply) {
+			choices = append(choices, application.ActionApply)
+		}
+		choices = append(choices, actionChoices(m.action.resource)...)
+		return choices
 	}
 	if len(m.action.choices) > 0 {
 		return m.action.choices
@@ -2240,47 +2633,63 @@ func selectedAction(resource actionResource, index int) application.Action {
 }
 
 func actionResourceLabel(resource actionResource) string {
+	return actionResourceLabelLocalized(resource, i18n.New("en"))
+}
+
+func actionResourceLabelLocalized(resource actionResource, localizer sharedui.Localizer) string {
 	switch resource {
 	case actionImages:
-		return "Images"
+		return localizer.Text(i18n.MessageTabImages)
 	case actionNetworks:
-		return "Networks"
+		return localizer.Text(i18n.MessageTabNetworks)
 	case actionVolumes:
-		return "Volumes"
+		return localizer.Text(i18n.MessageTabVolumes)
 	case actionStacks:
-		return "Stacks"
+		return localizer.Text(i18n.MessageTabStacks)
 	case actionStackContainers:
-		return "Stack containers"
+		return localizer.Text(i18n.MessageResourceStackContainersLabel)
 	}
-	return "Containers"
+	return localizer.Text(i18n.MessageTabContainers)
 }
 
 func actionLabel(action application.Action) string {
+	return actionLabelLocalized(action, i18n.New("en"))
+}
+
+func actionLabelLocalized(action application.Action, localizer sharedui.Localizer) string {
 	switch action {
 	case application.ActionStop:
-		return "Stop"
+		return localizer.Text(i18n.MessageActionStop)
 	case application.ActionRestart:
-		return "Restart"
+		return localizer.Text(i18n.MessageActionRestart)
 	case application.ActionDelete:
-		return "Force delete"
+		return localizer.Text(i18n.MessageActionForceDelete)
 	case application.ActionDown:
-		return "Down stack"
+		return localizer.Text(i18n.MessageActionDownStack)
 	case application.ActionUp:
-		return "Up stack"
+		return localizer.Text(i18n.MessageActionUpStack)
 	case application.ActionPull:
-		return "Pull update"
+		return localizer.Text(i18n.MessageActionPullUpdate)
 	case application.ActionRecreate:
-		return "Recreate containers"
+		return localizer.Text(i18n.MessageActionRecreate)
+	case application.ActionUpdate:
+		return localizer.Text(i18n.MessageActionUpdateNow)
+	case application.ActionApply:
+		return localizer.Text(i18n.MessageActionApplyUpdate)
 	default:
-		return "Cancel"
+		return localizer.Text(i18n.MessageActionCancel)
 	}
 }
 
 func actionLabelForResource(action application.Action, resource actionResource) string {
+	return actionLabelForResourceLocalized(action, resource, i18n.New("en"))
+}
+
+func actionLabelForResourceLocalized(action application.Action, resource actionResource, localizer sharedui.Localizer) string {
 	if (resource == actionImages || resource == actionNetworks || resource == actionVolumes) && action == application.ActionDelete {
-		return "Delete"
+		return localizer.Text(i18n.MessageActionDelete)
 	}
-	return actionLabel(action)
+	return actionLabelLocalized(action, localizer)
 }
 
 func (m Model) actionView() sharedui.View {
@@ -2295,9 +2704,9 @@ func (m Model) targetNames(targets []actionTarget) []string {
 	for _, target := range targets {
 		line := "- " + target.Name
 		if target.Unavailable != "" {
-			line += " (unavailable: " + target.Unavailable + ")"
+			line += m.localizer.Text(i18n.MessageActionTargetUnavailable, target.Unavailable)
 		} else if m.action.resource == actionStacks && target.State != "" {
-			line += " (unavailable: " + target.State + ")"
+			line += m.localizer.Text(i18n.MessageActionTargetUnavailable, target.State)
 		}
 		names = append(names, line)
 	}
@@ -2309,24 +2718,67 @@ func (m Model) confirmationBanner() string {
 	if m.action.stage != actionConfirm {
 		return ""
 	}
-	action := actionLabelForResource(m.selectedAction(), m.action.resource)
-	names := make([]string, 0, len(m.action.targets))
-	for index, target := range m.action.targets {
+	action := actionLabelForResourceLocalized(m.selectedAction(), m.action.resource, m.localizer)
+	targets := m.confirmationTargets(m.selectedAction())
+	names := make([]string, 0, len(targets))
+	for index, name := range targets {
 		if index == 3 {
-			names = append(names, fmt.Sprintf("+%d more", len(m.action.targets)-index))
+			names = append(names, m.localizer.Text(i18n.MessageConfirmMore, len(targets)-index))
 			break
 		}
-		names = append(names, target.Name)
+		names = append(names, name)
 	}
-	return strings.Join([]string{
-		"CONFIRM: " + action,
-		"Target: " + strings.Join(names, ", ") + " on " + engineTarget(m.snapshot.Engine),
-		confirmationControls(m.selectedAction()),
-	}, "\n")
+	lines := []string{
+		m.localizer.Text(i18n.MessageConfirmTitle, action),
+		m.localizer.Text(i18n.MessageConfirmTarget, strings.Join(names, ", "), engineTargetLocalized(m.snapshot.Engine, m.localizer)),
+	}
+	if isContainerUpdateAction(m.selectedAction()) {
+		eligible := 0
+		for _, target := range m.action.targets {
+			if targetUpdateEligible(m.selectedAction(), target) {
+				eligible++
+			}
+		}
+		if eligible < len(m.action.targets) {
+			lines = append(lines, m.localizer.Text(i18n.MessageActionEligibility, eligible, len(m.action.targets)-eligible))
+		}
+	}
+	return strings.Join(append(lines, confirmationControlsLocalized(m.selectedAction(), m.localizer)), "\n")
+}
+
+func (m Model) confirmationTargets(action application.Action) []string {
+	if !isContainerUpdateAction(action) {
+		result := make([]string, 0, len(m.action.targets))
+		for _, target := range m.action.targets {
+			result = append(result, target.Name)
+		}
+		return result
+	}
+	seen := make(map[string]struct{}, len(m.action.targets))
+	result := make([]string, 0, len(m.action.targets))
+	for _, target := range m.action.targets {
+		name := target.Name
+		if target.Stack != nil {
+			name = target.Stack.Name
+			if target.Service != "" {
+				name += "/" + target.Service
+			}
+		}
+		if _, found := seen[name]; found {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+	}
+	return result
 }
 
 func confirmationControls(action application.Action) string {
-	return "Are you sure? [y/N] | esc cancel"
+	return confirmationControlsLocalized(action, i18n.New("en"))
+}
+
+func confirmationControlsLocalized(_ application.Action, localizer sharedui.Localizer) string {
+	return localizer.Text(i18n.MessageConfirmControls)
 }
 
 func (m *Model) showActionResult(results []application.ActionResult) {
@@ -2337,9 +2789,9 @@ func (m *Model) showActionResult(results []application.ActionResult) {
 		}
 	}
 	if succeeded == len(results) {
-		m.notice = fmt.Sprintf("%d action%s completed", succeeded, plural(succeeded))
+		m.notice = m.localizer.Plural(i18n.MessageResultCompleted, succeeded)
 	} else {
-		m.notice = fmt.Sprintf("%d completed, %d failed", succeeded, len(results)-succeeded)
+		m.notice = m.localizer.Text(i18n.MessageResultPartial, succeeded, len(results)-succeeded)
 	}
 	m.noticeGeneration++
 }
@@ -2418,19 +2870,139 @@ func (m *Model) applyPendingImageStatuses() {
 	}
 }
 
-func (m *Model) recordPendingRecreates(imageID string) {
+func (m *Model) applyContainerUpdateStatuses() {
+	for index := range m.snapshot.Containers {
+		container := &m.snapshot.Containers[index]
+		container.Update = ""
+		if container.State == "running" {
+			container.Update = m.containerUpdates[container.ID]
+		}
+		if _, found := m.pendingRecreates[container.ID]; found {
+			container.Update = domain.UpdatePulledPendingRecreate
+		}
+	}
+}
+
+func aggregateUpdateStatus(current, next domain.UpdateStatus) domain.UpdateStatus {
+	rank := func(status domain.UpdateStatus) int {
+		switch status {
+		case domain.UpdatePulledPendingRecreate:
+			return 6
+		case domain.UpdateAvailable:
+			return 5
+		case domain.UpdateChecking:
+			return 4
+		case domain.UpdateUnknown:
+			return 3
+		case domain.UpdatePinned:
+			return 2
+		case domain.UpdateCurrent:
+			return 1
+		default:
+			return 0
+		}
+	}
+	if rank(next) > rank(current) {
+		return next
+	}
+	return current
+}
+
+func (m *Model) prunePendingRecreates() {
+	available := make(map[string]struct{}, len(m.snapshot.Containers))
+	for _, container := range m.snapshot.Containers {
+		available[container.ID] = struct{}{}
+	}
+	for id := range m.pendingRecreates {
+		if _, found := available[id]; !found {
+			delete(m.pendingRecreates, id)
+		}
+	}
+}
+
+func stackUpdateStatus(stack domain.Stack) domain.UpdateStatus {
+	status := domain.UpdateStatus("")
+	for _, container := range stack.ContainerItems {
+		if container.Update == domain.UpdatePulledPendingRecreate {
+			return domain.UpdatePulledPendingRecreate
+		}
+		if container.Update == domain.UpdateAvailable {
+			status = domain.UpdateAvailable
+		}
+	}
+	return status
+}
+
+func (m *Model) reconcileContainerUpdateResults(action application.Action, targets []actionTarget, results []application.ActionResult) {
 	if m.pendingRecreates == nil {
 		m.pendingRecreates = make(map[string]pendingImageRecreate)
 	}
-	imageID = normalizedImageID(imageID)
+	for _, result := range results {
+		for _, target := range targets {
+			if result.ID != target.ID && (target.Stack == nil || result.ID != target.Stack.Name) {
+				continue
+			}
+			containers := []actionTarget{target}
+			if target.Stack != nil {
+				containers = make([]actionTarget, 0, len(target.Stack.ContainerItems))
+				for _, container := range target.Stack.ContainerItems {
+					if target.Service != "" && container.ComposeService != target.Service {
+						continue
+					}
+					if !result.Applied && action != application.ActionApply && container.Update != domain.UpdateAvailable && container.Update != domain.UpdatePulledPendingRecreate || !result.Applied && action == application.ActionApply && container.Update != domain.UpdatePulledPendingRecreate {
+						continue
+					}
+					containers = append(containers, actionTarget{ID: container.ID, ImageID: container.ImageID, Update: container.Update, PullRefs: []string{container.Image}, Stack: target.Stack, Service: container.ComposeService})
+				}
+			}
+			for _, container := range containers {
+				reference := ""
+				if len(container.PullRefs) > 0 {
+					reference = container.PullRefs[0]
+				}
+				if len(container.Recreate) > 0 {
+					reference = container.Recreate[0].Reference
+				}
+				if result.Pulled && !result.Applied {
+					m.pendingRecreates[container.ID] = pendingImageRecreate{ContainerID: container.ID, ImageID: container.ImageID, Reference: reference, Compose: target.Stack != nil}
+					m.containerUpdates[container.ID] = domain.UpdatePulledPendingRecreate
+					m.setImageUpdate(container.ImageID, domain.UpdatePulledPendingRecreate)
+				}
+				if result.Applied {
+					delete(m.pendingRecreates, container.ID)
+					delete(m.containerUpdates, container.ID)
+					m.setImageUpdate(container.ImageID, domain.UpdateUnknown)
+				}
+				if m.updates != nil && reference != "" {
+					m.updates.Invalidate(reference)
+				}
+			}
+		}
+	}
+	m.applyPendingImageStatuses()
+	m.applyContainerUpdateStatuses()
+}
+
+func (m *Model) recordPendingRecreate(update domain.ImageUpdate) {
+	if m.pendingRecreates == nil {
+		m.pendingRecreates = make(map[string]pendingImageRecreate)
+	}
+	imageID := normalizedImageID(update.ImageID)
 	for _, container := range m.snapshot.Containers {
+		if update.ContainerID != "" && container.ID != update.ContainerID {
+			continue
+		}
 		if container.State != "running" || normalizedImageID(container.ImageID) != imageID {
 			continue
 		}
 		if _, ok := application.NormalizeImageReference(container.Image); !ok {
 			continue
 		}
-		m.pendingRecreates[container.ID] = pendingImageRecreate{ContainerID: container.ID, ImageID: container.ImageID, Reference: container.Image, Compose: container.ComposeProject != ""}
+		reference := container.Image
+		if update.Reference != "" {
+			reference = update.Reference
+		}
+		m.pendingRecreates[container.ID] = pendingImageRecreate{ContainerID: container.ID, ImageID: container.ImageID, Reference: reference, Compose: container.ComposeProject != ""}
 	}
 }
 
@@ -2454,13 +3026,6 @@ func preserveImageUpdates(previous, images []domain.Image) []domain.Image {
 	return images
 }
 
-func plural(count int) string {
-	if count == 1 {
-		return ""
-	}
-	return "s"
-}
-
 func (m Model) expireActionNotice() tea.Cmd {
 	generation := m.noticeGeneration
 	return tea.Tick(actionResultDuration, func(time.Time) tea.Msg {
@@ -2477,15 +3042,37 @@ func shortContainerID(id string) string {
 }
 
 func engineTarget(engine domain.EngineInfo) string {
-	scope := "LOCAL"
+	return engineTargetLocalized(engine, i18n.New("en"))
+}
+
+func engineTargetLocalized(engine domain.EngineInfo, localizer sharedui.Localizer) string {
+	scope := localizer.Text(i18n.MessageScopeLocal)
 	if engine.Remote {
-		scope = "REMOTE"
+		scope = localizer.Text(i18n.MessageScopeRemote)
 	}
 
 	return scope + " " + engine.Name
 }
 
+func (m Model) actionResourceCount(count int) string {
+	id := i18n.MessageResourceContainers
+	switch m.action.resource {
+	case actionImages:
+		id = i18n.MessageResourceImages
+	case actionNetworks:
+		id = i18n.MessageResourceNetworks
+	case actionVolumes:
+		id = i18n.MessageResourceVolumes
+	case actionStacks:
+		id = i18n.MessageResourceStacks
+	case actionStackContainers:
+		id = i18n.MessageResourceStackContainers
+	}
+	return m.localizer.Plural(id, count)
+}
+
 func (m Model) containersView(layout sharedui.Layout) sharedui.View {
+	title := m.localizer.Text(i18n.MessageTabContainers)
 	if m.action.stage == actionMenu {
 		return m.actionMenuView()
 	}
@@ -2496,24 +3083,24 @@ func (m Model) containersView(layout sharedui.Layout) sharedui.View {
 		return m.logsView(layout)
 	}
 	if m.shellActive {
-		return sharedui.View{Title: "Container shell", Status: sharedui.StatusLoading, Summary: "Starting an interactive shell..."}
+		return sharedui.View{Title: m.localizer.Text(i18n.MessageContainerShellTitle), Status: sharedui.StatusLoading, Summary: m.localizer.Text(i18n.MessageContainerShellStarting)}
 	}
 	if m.shellErr != nil {
 		return sharedui.View{
-			Title: "Containers", Status: sharedui.StatusError, Summary: "Container shell failed: " + m.shellErr.Error(),
-			Sections: []sharedui.Section{{Title: "Next", Body: "Check that the container is running, /bin/sh exists, and Docker permissions allow exec. Press s to try again."}},
+			Title: title, Status: sharedui.StatusError, Summary: m.localizer.Text(i18n.MessageContainerShellFailed) + m.shellErr.Error(),
+			Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageContainerShellFailureNext)}},
 		}
 	}
 	if m.showHelp {
 		sections := []sharedui.Section{
-			{Title: "Help", Body: "s shell | e edit | space select | enter actions | up/down move | o sort | r refresh | left/right view | esc close | q quit"},
-			{Title: "Connection", Body: engineDetails(m.snapshot.Engine)},
+			{Title: m.localizer.Text(i18n.MessageSectionHelp), Body: m.localizer.Text(i18n.MessageContainersHelp)},
+			{Title: m.localizer.Text(i18n.MessageSectionConnection), Body: engineDetailsLocalized(m.snapshot.Engine, m.localizer)},
 		}
 		if m.dockerHubLoginChecked && !m.dockerHubLoginConfigured {
-			sections = append(sections, sharedui.Section{Title: "Image updates", Body: "To get updates for your container images, log in to Docker Hub with: docker login"})
+			sections = append(sections, sharedui.Section{Title: m.localizer.Text(i18n.MessageSectionImageUpdates), Body: m.localizer.Text(i18n.MessageDockerHubHelp)})
 		}
 		return sharedui.View{
-			Title:      "Containers",
+			Title:      title,
 			Status:     sharedui.StatusReady,
 			HideStatus: true,
 			Sections:   sections,
@@ -2522,9 +3109,9 @@ func (m Model) containersView(layout sharedui.Layout) sharedui.View {
 
 	if m.loading {
 		return sharedui.View{
-			Title:   "Containers",
+			Title:   title,
 			Status:  sharedui.StatusLoading,
-			Summary: "Connecting to Docker Engine and loading containers...",
+			Summary: m.localizer.Text(i18n.MessageContainersLoading),
 		}
 	}
 
@@ -2535,33 +3122,33 @@ func (m Model) containersView(layout sharedui.Layout) sharedui.View {
 		}
 
 		return sharedui.View{
-			Title:   "Containers",
+			Title:   title,
 			Status:  status,
-			Summary: dockerErrorSummary(m.err),
+			Summary: dockerErrorSummaryLocalized(m.err, m.localizer),
 			Sections: []sharedui.Section{
-				{Title: "Connection", Body: "dtop could not connect to a supported local Docker Engine."},
-				{Title: "Next", Body: "Check Docker Desktop, docker context, DOCKER_HOST, socket permissions, or daemon status. Press r to retry."},
+				{Title: m.localizer.Text(i18n.MessageSectionConnection), Body: m.localizer.Text(i18n.MessageContainersConnectionFailure)},
+				{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageContainersConnectionNext)},
 			},
 		}
 	}
 
 	if len(m.snapshot.Containers) == 0 {
 		return sharedui.View{
-			Title:   "Containers",
+			Title:   title,
 			Status:  sharedui.StatusEmpty,
-			Summary: "Connected to Docker Engine, but no containers were found.",
+			Summary: m.localizer.Text(i18n.MessageContainersEmptySummary),
 			Sections: []sharedui.Section{
-				{Title: "Containers", Body: "No containers. Try creating one with Docker, then press r to retry."},
+				{Title: title, Body: m.localizer.Text(i18n.MessageContainersEmptyBody)},
 			},
 		}
 	}
 
 	return sharedui.View{
-		Title:      "Containers",
+		Title:      title,
 		Status:     sharedui.StatusReady,
 		HideStatus: true,
 		Sections: []sharedui.Section{
-			{Body: renderContainersWithColors(m.snapshot.Containers, m.selectedID, m.selected, m.editing, m.now(), layout, m.memoryMode, m.accentColor, m.focusColor)},
+			{Body: renderContainersLocalized(m.snapshot.Containers, m.selectedID, m.selected, m.editing, m.now(), layout, m.memoryMode, m.accentColor, m.focusColor, m.localizer)},
 		},
 	}
 }
@@ -2574,13 +3161,14 @@ func (m Model) imagesActionView() sharedui.View {
 }
 
 func (m Model) detailsView() sharedui.View {
+	title := m.localizer.Text(i18n.MessageContainerDetails)
 	if m.detailLoading {
-		return sharedui.View{Title: "Container details", Status: sharedui.StatusLoading, Summary: "Loading container details..."}
+		return sharedui.View{Title: title, Status: sharedui.StatusLoading, Summary: m.localizer.Text(i18n.MessageContainerDetailsLoad)}
 	}
 	if m.detailErr != nil {
 		return sharedui.View{
-			Title: "Container details", Status: sharedui.StatusError, Summary: m.detailErr.Error(),
-			Sections: []sharedui.Section{{Title: "Controls", Body: "esc back"}},
+			Title: title, Status: sharedui.StatusError, Summary: m.detailErr.Error(),
+			Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageCommonBack)}},
 		}
 	}
 	details := m.details
@@ -2593,43 +3181,47 @@ func (m Model) detailsView() sharedui.View {
 		networks = strings.Join(details.Networks, ", ")
 	}
 	return sharedui.View{
-		Title: "Container details", Status: sharedui.StatusReady, HideStatus: true,
+		Title: title, Status: sharedui.StatusReady, HideStatus: true,
 		Sections: []sharedui.Section{
-			{Title: details.Name, Body: strings.Join([]string{"ID: " + shortContainerID(details.ID), "Image: " + details.Image, "State: " + details.State, "Health: " + details.Health, "Uptime: " + formatUptime(details.StartedAt, details.State, m.now())}, "\n")},
-			{Title: "Ports", Body: ports},
-			{Title: "Networks", Body: networks},
-			{Title: "Controls", Body: "l logs | esc back"},
+			{Title: details.Name, Body: strings.Join([]string{m.localizer.Text(i18n.MessageDetailsID, shortContainerID(details.ID)), m.localizer.Text(i18n.MessageDetailsImage, details.Image), m.localizer.Text(i18n.MessageDetailsState, localizeState(m.localizer, details.State)), m.localizer.Text(i18n.MessageDetailsHealth, localizeHealth(m.localizer, details.Health)), m.localizer.Text(i18n.MessageDetailsUptime, formatUptime(details.StartedAt, details.State, m.now()))}, "\n")},
+			{Title: m.localizer.Text(i18n.MessageSectionPorts), Body: ports},
+			{Title: m.localizer.Text(i18n.MessageSectionNetworks), Body: networks},
+			{Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageFooterContainerDetails)},
 		},
 	}
 }
 
 func (m Model) logsView(layout sharedui.Layout) sharedui.View {
-	status := "Loading log stream..."
+	status := m.localizer.Text(i18n.MessageLogsLoading)
 	if m.logActive {
-		status = "Following live logs"
+		status = m.localizer.Text(i18n.MessageLogsFollowing)
 	}
 	if m.logErr != nil {
 		status = m.logErr.Error()
 	}
 	lines := visibleLogs(m.logLines, m.logOffset, logLineCount(layout))
-	body := "(no log output)"
+	body := m.localizer.Text(i18n.MessageLogsEmpty)
 	if len(lines) > 0 {
 		body = strings.Join(lines, "\n")
 	}
 	return sharedui.View{
-		Title: logPanelTitle(m.stackLogs), Status: sharedui.StatusReady, HideStatus: true, Summary: status,
+		Title: logPanelTitleLocalized(m.stackLogs, m.localizer), Status: sharedui.StatusReady, HideStatus: true, Summary: status,
 		Sections: []sharedui.Section{
 			{Title: m.logName(), Body: body},
-			{Title: "Controls", Body: "up/down scroll | esc stop and back"},
+			{Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageLogsControls)},
 		},
 	}
 }
 
 func logPanelTitle(stack bool) string {
+	return logPanelTitleLocalized(stack, i18n.New("en"))
+}
+
+func logPanelTitleLocalized(stack bool, localizer sharedui.Localizer) string {
 	if stack {
-		return "Compose logs"
+		return localizer.Text(i18n.MessageLogsComposeTitle)
 	}
-	return "Container logs"
+	return localizer.Text(i18n.MessageLogsContainerTitle)
 }
 func (m Model) logName() string {
 	if m.stackLogs {
@@ -2671,43 +3263,54 @@ func visibleLogs(lines []string, offset, limit int) []string {
 }
 
 func engineDetails(info domain.EngineInfo) string {
+	return engineDetailsLocalized(info, i18n.New("en"))
+}
+
+func engineDetailsLocalized(info domain.EngineInfo, localizer sharedui.Localizer) string {
 	return strings.Join([]string{
-		"Name: " + info.Name,
-		"Endpoint: " + info.Endpoint,
-		"Transport: " + info.Transport,
-		"Remote: " + yesNo(info.Remote),
-		"Secure: " + yesNo(info.Secure),
-		"Source: " + info.Source,
-		"Server: " + info.ServerVersion,
-		"API: " + info.APIVersion,
-		"OS: " + info.OperatingSystem,
-		fmt.Sprintf("CPUs: %d", info.NCPU),
-		"RAM: " + formatBytes(info.MemoryTotal),
+		localizer.Text(i18n.MessageEngineName, info.Name),
+		localizer.Text(i18n.MessageEngineEndpoint, info.Endpoint),
+		localizer.Text(i18n.MessageEngineTransport, info.Transport),
+		localizer.Text(i18n.MessageEngineRemote, yesNoLocalized(info.Remote, localizer)),
+		localizer.Text(i18n.MessageEngineSecure, yesNoLocalized(info.Secure, localizer)),
+		localizer.Text(i18n.MessageEngineSource, info.Source),
+		localizer.Text(i18n.MessageEngineServer, info.ServerVersion),
+		localizer.Text(i18n.MessageEngineAPI, info.APIVersion),
+		localizer.Text(i18n.MessageEngineOS, info.OperatingSystem),
+		localizer.Text(i18n.MessageEngineCPUs, info.NCPU),
+		localizer.Text(i18n.MessageEngineRAM, formatBytes(info.MemoryTotal)),
 	}, "\n")
 }
 
 func dockerErrorSummary(err error) string {
+	return dockerErrorSummaryLocalized(err, i18n.New("en"))
+}
+
+func dockerErrorSummaryLocalized(err error, localizer sharedui.Localizer) string {
 	if errors.Is(err, domain.ErrRemoteUnsupported) {
-		return "A remote Docker endpoint is configured, but D1A only supports local Engines. Remote support is planned for D1R."
+		return localizer.Text(i18n.MessageDockerRemoteUnsupported)
 	}
 
 	return err.Error()
 }
 
 func yesNo(value bool) string {
-	if value {
-		return "yes"
-	}
+	return yesNoLocalized(value, i18n.New("en"))
+}
 
-	return "no"
+func yesNoLocalized(value bool, localizer sharedui.Localizer) string {
+	if value {
+		return localizer.Text(i18n.MessageCommonYes)
+	}
+	return localizer.Text(i18n.MessageCommonNo)
 }
 
 func (m Model) headerSummary() string {
 	if m.loading {
-		return "connecting Docker Engine"
+		return m.localizer.Text(i18n.MessageHeaderConnecting)
 	}
 	if m.err != nil {
-		return "Docker unavailable"
+		return m.localizer.Text(i18n.MessageHeaderUnavailable)
 	}
 
 	running := 0
@@ -2717,100 +3320,117 @@ func (m Model) headerSummary() string {
 		}
 	}
 
-	scope := "LOCAL"
+	scope := m.localizer.Text(i18n.MessageScopeLocal)
 	if m.snapshot.Engine.Remote {
-		scope = "REMOTE"
+		scope = m.localizer.Text(i18n.MessageScopeRemote)
 	}
 	cpu := "--"
 	if m.snapshot.CPUAvailable {
-		cpu = fmt.Sprintf("%.1f%%", m.snapshot.ContainerCPUPercent)
+		cpu = m.localizer.Decimal(m.snapshot.ContainerCPUPercent, 1) + "%"
 	}
 	memory := "--/" + formatBytes(m.snapshot.Engine.MemoryTotal)
 	if m.snapshot.MemoryAvailable {
 		memory = formatBytes(m.snapshot.ContainerMemoryUsage) + "/" + formatBytes(m.snapshot.Engine.MemoryTotal)
 	}
 
-	return fmt.Sprintf("%s %s | CPU %s | RAM %s | %d/%d running | SORT: %s | Docker %s", scope, m.snapshot.Engine.Name, cpu, memory, running, len(m.snapshot.Containers), sortLabel(m.sortMode), m.snapshot.Engine.ServerVersion)
+	return m.localizer.Text(i18n.MessageHeaderSummary, scope, m.snapshot.Engine.Name, cpu, memory, running, len(m.snapshot.Containers), m.localizer.Text(i18n.MessageHeaderRunning), sortLabelLocalized(m.sortMode, m.localizer), m.snapshot.Engine.ServerVersion)
 }
 
 func (m Model) footer(layout sharedui.Layout) string {
 	if m.action.stage == actionConfirm {
-		return "Confirmation below"
+		return m.localizer.Text(i18n.MessageFooterConfirmation)
 	}
 	if m.notice != "" {
 		return m.notice
 	}
 	if m.active == 1 {
 		if m.selectedStackContainerID != "" && m.expandedStackName == m.selectedStackName {
-			return "s shell  l logs  enter actions  esc collapse  up/down select  r refresh  left/right views  q quit"
+			if m.stackContainerEditing {
+				return m.localizer.Text(i18n.MessageFooterEdit, len(m.selectedStackContainers))
+			}
+			return m.localizer.Text(i18n.MessageFooterStackChild)
 		}
-		return "enter expand  esc collapse  up/down select  r refresh  left/right views  q quit"
+		if m.stackEditing {
+			return m.localizer.Text(i18n.MessageFooterEdit, len(m.selectedStacks))
+		}
+		return m.localizer.Text(i18n.MessageFooterStack)
 	}
 	if m.active == 2 {
 		if m.action.resource == actionImages && m.action.stage != actionNone {
-			return "up/down choose  enter continue  esc cancel"
+			return m.localizer.Text(i18n.MessageFooterActions)
 		}
 		if m.imageDetailOpen {
-			return "esc back  left/right views  q quit"
+			return m.localizer.Text(i18n.MessageFooterDetails)
 		}
 		if m.imageEditing {
-			return fmt.Sprintf("EDIT: %d selected | space toggle | enter actions | e/esc cancel", len(m.selectedImages))
+			return m.localizer.Text(i18n.MessageFooterEdit, len(m.selectedImages))
 		}
-		return "enter details  e edit  up/down select  r refresh  left/right views  q quit"
+		return m.localizer.Text(i18n.MessageFooterResource)
 	}
 	if m.active == 3 {
 		if m.action.resource == actionNetworks && m.action.stage != actionNone {
-			return "up/down choose  enter continue  esc cancel"
+			return m.localizer.Text(i18n.MessageFooterActions)
 		}
 		if m.networkDetailOpen {
-			return "esc back  left/right views  q quit"
+			return m.localizer.Text(i18n.MessageFooterDetails)
 		}
 		if m.networkEditing {
-			return fmt.Sprintf("EDIT: %d selected | space toggle | enter actions | e/esc cancel", len(m.selectedNetworks))
+			return m.localizer.Text(i18n.MessageFooterEdit, len(m.selectedNetworks))
 		}
-		return "enter details  e edit  up/down select  r refresh  left/right views  q quit"
+		return m.localizer.Text(i18n.MessageFooterResource)
 	}
 	if m.active == 4 {
 		if m.action.resource == actionVolumes && m.action.stage != actionNone {
-			return "up/down choose  enter continue  esc cancel"
+			return m.localizer.Text(i18n.MessageFooterActions)
 		}
 		if m.volumeDetailOpen {
-			return "esc back  left/right views  q quit"
+			return m.localizer.Text(i18n.MessageFooterDetails)
 		}
 		if m.volumeEditing {
-			return fmt.Sprintf("EDIT: %d selected | space toggle | enter actions | e/esc cancel", len(m.selectedVolumes))
+			return m.localizer.Text(i18n.MessageFooterEdit, len(m.selectedVolumes))
 		}
-		return "enter details  e edit  up/down select  r refresh  left/right views  q quit"
+		return m.localizer.Text(i18n.MessageFooterResource)
 	}
 	if m.panel == panelLogs {
-		return "up/down scroll  esc stop and back  q quit"
+		return m.localizer.Text(i18n.MessageFooterLogs)
 	}
 	if m.panel == panelDetails {
-		return "l logs  esc back  q quit"
+		return m.localizer.Text(i18n.MessageFooterContainerDetails)
 	}
 	if m.editing {
-		return fmt.Sprintf("EDIT: %d selected | space toggle | enter actions | e/esc cancel", len(m.selected))
+		return m.localizer.Text(i18n.MessageFooterEdit, len(m.selected))
 	}
 	switch layout.Mode {
 	case sharedui.LayoutMinimal:
-		return "e edit  q quit  up/down"
+		return m.localizer.Text(i18n.MessageFooterMinimal)
 	case sharedui.LayoutCompact:
-		return "s shell  e edit  up/down select  o sort  r refresh  q quit"
+		return m.localizer.Text(i18n.MessageFooterCompact)
 	default:
-		return "s shell  enter details  l logs  e edit  up/down select  o sort  r refresh  left/right views  ? help  q quit"
+		return m.localizer.Text(i18n.MessageFooterDefault)
 	}
 }
 
+func (m Model) dockerHubFooterNotice() string {
+	if m.dockerHubLoginChecked && !m.dockerHubLoginConfigured {
+		return m.localizer.Text(i18n.MessageDockerHubFooter)
+	}
+	return ""
+}
+
 func sortLabel(mode application.SortMode) string {
+	return sortLabelLocalized(mode, i18n.New("en"))
+}
+
+func sortLabelLocalized(mode application.SortMode, localizer sharedui.Localizer) string {
 	switch mode {
 	case application.SortCPU:
-		return "CPU"
+		return localizer.Text(i18n.MessageSortCPU)
 	case application.SortMemory:
-		return "Memory"
+		return localizer.Text(i18n.MessageSortMemory)
 	case application.SortName:
-		return "Name"
+		return localizer.Text(i18n.MessageSortName)
 	default:
-		return "State"
+		return localizer.Text(i18n.MessageSortState)
 	}
 }
 

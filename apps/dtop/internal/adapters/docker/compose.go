@@ -67,6 +67,16 @@ func (r *Runtime) StopStack(ctx context.Context, stack domain.Stack) error {
 func (r *Runtime) RestartStack(ctx context.Context, stack domain.Stack) error {
 	return r.compose(ctx, stack, "restart")
 }
+func (r *Runtime) PullStack(ctx context.Context, stack domain.Stack) error {
+	return r.compose(ctx, stack, "pull")
+}
+func (r *Runtime) PullStackServices(ctx context.Context, stack domain.Stack, services []string) error {
+	return r.compose(ctx, stack, "pull", services...)
+}
+func (r *Runtime) UpStackServices(ctx context.Context, stack domain.Stack, services []string) error {
+	extra := append([]string{"-d", "--no-deps"}, services...)
+	return r.compose(ctx, stack, "up", extra...)
+}
 func (r *Runtime) Down(ctx context.Context, stack domain.Stack) error {
 	return r.compose(ctx, stack, "down")
 }

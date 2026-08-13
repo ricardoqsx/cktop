@@ -25,6 +25,15 @@ Ejecutar `dtop`:
 go run ./apps/dtop/cmd/dtop
 ```
 
+La interfaz de `dtop` usa el locale del entorno y admite ingles (`en`) y espanol (`es`). Puede forzarse por ejecucion:
+
+```bash
+DTOP_LOCALE=es go run ./apps/dtop/cmd/dtop
+DTOP_LOCALE=en go run ./apps/dtop/cmd/dtop
+```
+
+La precedencia es `DTOP_LOCALE`, `LC_ALL`, `LC_MESSAGES` y `LANG`. Las variantes como `es_ES.UTF-8` se reducen al idioma base; locales no admitidos y mensajes ausentes usan ingles.
+
 Ejecutar `ktop`:
 
 ```bash
@@ -44,13 +53,14 @@ left/right      switch Containers, Stacks, Images, Networks and Volumes
 up/down or j/k  select the current resource
 o               cycle State, CPU, Memory and Name sorting
 r               refresh the active resource list
-enter           open details for the current resource, expand a stack, or open contextual stack/container actions
+enter           open contextual actions for Containers and Images, details for Networks/Volumes, or expand a Stack
+d               open details for the current Container
 l               follow the last 100 log lines for the current container, focused stack child, or stack parent
 s               open a local interactive shell for the selected container or focused expanded stack child; use Ctrl+D or exit to return
 esc             stop logs, return from details, or collapse a stack
 e               enter/exit multi-selection mode in Containers, Stacks, Images, Networks or Volumes; on a stack child, select children of that stack
 space           toggle the current resource in multi-selection mode
-enter           open selected resource actions, or details when not editing
+a               in multi-selection mode, select or clear all checkboxes
 ?               help
 q               quit
 ```
@@ -93,7 +103,7 @@ concurrency = 4
 Valores disponibles: `usage`, `percent` y `both`.
 `accent_color` y `focus_color` aceptan valores ANSI/256 de `0` a `255`; sus defaults son `63` y `15`. El acento es el fondo del foco en tablas y menús, mientras `focus_color` define el texto resaltado.
 
-La detección de actualizaciones consulta cada referencia única usada por contenedores `running` mediante Docker CLI, reutilizando sus credenciales y credential helpers. Prefiere `docker buildx imagetools inspect` para obtener el digest del índice y usa `docker manifest inspect --verbose` como fallback verificable. Compara el digest remoto con los `RepoDigests` locales; `U` indica una actualización, `R` una imagen descargada pendiente de recrear sus contenedores, `=` actual, `P` una referencia fijada por digest, `?` una comparación no verificable y `...` una consulta activa. No filtra `latest`: una etiqueta versionada también se consulta. Enter abre las acciones de la imagen: `Pull update` está disponible para `U` y se ejecuta directamente con la referencia exacta usada por el contenedor; `Recreate containers` está disponible para `R` usado por contenedores directos locales y conserva su configuración inspectada. `Delete` está disponible siempre. Con `e` y espacio, las acciones se aplican a la selección. Pull no reinicia ni recrea contenedores; la recreación se confirma por separado. Si Docker Hub no tiene una credencial configurada, Help muestra el recordatorio persistente `docker login` hasta detectarla. Los contenedores Compose se actualizarán mediante su Stack registrado en una siguiente entrega.
+La detección de actualizaciones consulta cada referencia única usada por contenedores `running` mediante Docker CLI, reutilizando sus credenciales y credential helpers. Prefiere `docker buildx imagetools inspect` para obtener el digest del índice y usa `docker manifest inspect --verbose` como fallback verificable. Compara el digest remoto con los `RepoDigests` locales; `U` indica una actualización, `R` una imagen descargada pendiente de aplicar, `=` actual, `P` una referencia fijada por digest, `?` una comparación no verificable y `...` una consulta activa. No filtra `latest`: una etiqueta versionada también se consulta. Images conserva la vista de referencia, mientras Containers muestra una marca compacta `U` o `R` junto al nombre y expone `Pull update`, `Update now` o `Apply downloaded update` desde su menú contextual. La selección múltiple procesa únicamente destinos elegibles y muestra cuántos se omiten. Para contenedores directos, `Update now` hace pull y recrea conservando la configuración inspeccionada; los contenedores `AutoRemove` se rechazan porque no pueden restaurarse con seguridad. En Compose, una acción iniciada desde hijos se deduplica por Stack y servicio; una selección de padres opera el Stack completo. Ambas rutas requieren metadata válida y ejecutan `docker compose pull` seguido de `up -d`; la ruta por servicio añade `--no-deps` para respetar el alcance confirmado. Pull no reinicia ni recrea contenedores. Si Docker Hub no tiene una credencial configurada, Help muestra el recordatorio persistente `docker login` hasta detectarla.
 
 Para registrar opcionalmente un proyecto Compose local:
 

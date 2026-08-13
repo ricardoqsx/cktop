@@ -15,6 +15,7 @@ import (
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/application"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/config"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/domain"
+	"github.com/ricardoqsx/cktop/apps/dtop/internal/i18n"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/ports"
 	sharedui "github.com/ricardoqsx/cktop/libs/tui"
 )
@@ -65,6 +66,89 @@ func TestHeaderShowsScopeAndAggregatedMetrics(t *testing.T) {
 	for _, expected := range []string{"REMOTE production", "CPU 25.0%", "RAM 2G/8G", "1/2 running", "Docker 29.6.2"} {
 		if !strings.Contains(header, expected) {
 			t.Fatalf("expected header to contain %q, got %q", expected, header)
+		}
+	}
+}
+
+func TestSpanishModelLocalizesShellHeaderTableAndTechnicalValues(t *testing.T) {
+	model := NewModelWithUpdatesAndLocalizer(application.NewContainerService(fakeRuntime{}), config.Display{MemoryMode: config.MemoryBoth}, nil, nil, i18n.New("es"))
+	model.loading, model.imagesLoading, model.networksLoading, model.volumesLoading, model.stacksLoading = false, false, false, false, false
+	model.imagesLoaded, model.networksLoaded, model.volumesLoaded, model.stacksLoaded = true, true, true, true
+	model.width, model.height = 160, 30
+	model.snapshot = domain.Snapshot{
+		Engine:       domain.EngineInfo{Name: "desktop-linux", ServerVersion: "29.6.2", MemoryTotal: 2 * 1024 * 1024 * 1024},
+		Containers:   []domain.Container{{ID: "sha256:abcdef1234567890", ShortID: "abcdef123456", Name: "web", Image: "nginx:1.27", State: "running", Health: "healthy", CPUAvailable: true, CPUPercent: 12.5, MemoryAvailable: true, MemoryUsage: 512 * 1024 * 1024, MemoryLimit: 2 * 1024 * 1024 * 1024, MemoryPercent: 25.5}},
+		CPUAvailable: true, ContainerCPUPercent: 12.5, MemoryAvailable: true, ContainerMemoryUsage: 512 * 1024 * 1024,
+	}
+	model.syncSelection()
+
+	view := model.View()
+	for _, expected := range []string{"Contenedores", "Imagenes", "Redes", "Volumenes", "ORDEN: Estado", "NOMBRE", "ESTADO", "SALUD", "12,5%", "25,5%", "en ejecucion", "saludable", "desktop-linux", "29.6.2", "nginx:1.27", "abcdef123456"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("expected Spanish model view to contain %q, got %q", expected, view)
+		}
+	}
+}
+
+func TestSpanishModelLocalizesActionHelpAndPreservesRawErrors(t *testing.T) {
+	model := NewModelWithUpdatesAndLocalizer(application.NewContainerService(fakeRuntime{}), config.Display{MemoryMode: config.MemoryBoth}, nil, nil, i18n.New("es"))
+	model.loading = false
+	model.width, model.height = 180, 30
+	model.snapshot = domain.Snapshot{Engine: domain.EngineInfo{Name: "local"}, Containers: []domain.Container{{ID: "one", Name: "api", State: "running"}}}
+	model.syncSelection()
+	model.showHelp = true
+	help := model.View()
+	for _, expected := range []string{"Ayuda", "Conexion", "enter acciones", "q salir"} {
+		if !strings.Contains(help, expected) {
+			t.Fatalf("expected Spanish help to contain %q, got %q", expected, help)
+		}
+	}
+
+	model.showHelp = false
+	model.action = actionState{stage: actionMenu, resource: actionContainers, targets: []actionTarget{{ID: "one", Name: "api"}}}
+	menu := model.View()
+	for _, expected := range []string{"Seleccion: 1 contenedor", "Detener", "Reiniciar", "Forzar eliminacion", "Cancelar", "Accion", "Controles"} {
+		if !strings.Contains(menu, expected) {
+			t.Fatalf("expected Spanish action menu to contain %q, got %q", expected, menu)
+		}
+	}
+
+	model.action = actionState{}
+	model.err = errors.New("raw daemon failure at unix:///tmp/docker.sock")
+	errorView := model.View()
+	if !strings.Contains(errorView, "raw daemon failure at unix:///tmp/docker.sock") || !strings.Contains(errorView, "dtop no pudo conectarse") {
+		t.Fatalf("expected translated wrapper and unchanged raw error, got %q", errorView)
+	}
+}
+
+func TestEnglishDefaultAndLocalizedUsagePlurals(t *testing.T) {
+	model := NewModel(application.NewContainerService(fakeRuntime{}), config.MemoryBoth)
+	if got := model.localizer.Text(i18n.MessageTabContainers); got != "Containers" {
+		t.Fatalf("default constructor locale = %q, want English", got)
+	}
+
+	for _, test := range []struct {
+		count int
+		want  string
+	}{{0, "0 contenedores"}, {1, "1 contenedor"}, {3, "3 contenedores"}} {
+		if got := resourceUsageLocalized(test.count, true, i18n.New("es")); got != test.want {
+			t.Errorf("Spanish usage for %d = %q, want %q", test.count, got, test.want)
+		}
+	}
+}
+
+func TestSpanishStackMetadataAndDiagnosticsHeadingPreservePathsAndBody(t *testing.T) {
+	diagnostic := `config /tmp/dtop.conf:7: raw diagnostic body`
+	model := NewModelWithUpdatesAndLocalizer(application.NewContainerService(fakeRuntime{}), config.Display{MemoryMode: config.MemoryBoth}, nil, nil, i18n.New("es"), diagnostic)
+	model.active, model.stacksLoaded, model.stacksLoading = 1, true, false
+	model.width, model.height = 140, 30
+	model.stacks = []domain.Stack{{Name: "payments", State: "down", WorkingDir: "/srv/payments", Files: []string{"/srv/payments/compose.prod.yaml"}}}
+	model.syncStackSelection()
+
+	view := model.View()
+	for _, expected := range []string{"Stack seleccionado", "Directorio de trabajo: /srv/payments", "Archivos Compose: /srv/payments/compose.prod.yaml", "Down: disponible", "Diagnosticos de registro", diagnostic} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("expected Spanish stack view to contain %q, got %q", expected, view)
 		}
 	}
 }
@@ -394,7 +478,7 @@ func TestScanResultReconstructsPendingRecreateAfterRestart(t *testing.T) {
 	model.snapshot.Containers = []domain.Container{{ID: "container", Image: "one:latest", ImageID: "sha256:one", State: "running"}}
 	model.updatesGeneration = 4
 
-	updated, _ := model.Update(imageUpdatesLoadedMsg{generation: 4, updates: []domain.ImageUpdate{{ImageID: "one", Status: domain.UpdatePulledPendingRecreate}}})
+	updated, _ := model.Update(imageUpdatesLoadedMsg{generation: 4, updates: []domain.ImageUpdate{{ContainerID: "container", ImageID: "one", Reference: "one:latest", Status: domain.UpdatePulledPendingRecreate}}})
 	got := updated.(Model)
 	if got.images[0].Update != domain.UpdatePulledPendingRecreate {
 		t.Fatalf("scan status = %q, want pending recreate", got.images[0].Update)
@@ -444,7 +528,7 @@ func TestRenderContainersTruncatesLongValues(t *testing.T) {
 		Created: time.Unix(0, 0),
 	}}, "abc", nil, false, time.Unix(3600, 0), layout, config.MemoryBoth)
 
-	if !strings.Contains(view, "very-long-container-name-t...") || strings.Contains(view, "very-long-container-name-that-should-truncate") {
+	if !strings.Contains(view, "very-long-container-nam...") || strings.Contains(view, "very-long-container-name-that-should-truncate") {
 		t.Fatalf("expected truncated name, got %q", view)
 	}
 }
@@ -679,6 +763,18 @@ func TestDockerHubUpdateErrorRestoresLoginGuidance(t *testing.T) {
 	}
 }
 
+func TestDockerHubFooterNoticeTracksLoginState(t *testing.T) {
+	model := loadedSelectionModel(t)
+	model.dockerHubLoginChecked = true
+	if !strings.Contains(model.dockerHubFooterNotice(), "docker login") {
+		t.Fatal("missing Docker Hub notice on main screen")
+	}
+	model.dockerHubLoginConfigured = true
+	if notice := model.dockerHubFooterNotice(); notice != "" {
+		t.Fatalf("unexpected notice with configured login: %q", notice)
+	}
+}
+
 func TestPullActionRunsWithoutConfirmation(t *testing.T) {
 	model := loadedImageSelectionModel(t)
 	model.action = actionState{stage: actionMenu, resource: actionImages, targets: []actionTarget{{ID: "one", Name: "one:latest", PullRefs: []string{"one:latest"}}}, choices: []application.Action{application.ActionPull, application.ActionDelete, "cancel"}}
@@ -722,6 +818,167 @@ func TestEditTableShowsCheckboxes(t *testing.T) {
 	}
 	if !strings.Contains(view, ">[x]") {
 		t.Fatalf("expected active edit cursor, got %q", view)
+	}
+}
+
+func TestContainerRowsShowOnlyActionableUpdateIndicators(t *testing.T) {
+	layout := sharedui.ResolveLayout(80, 20)
+	view := renderContainers([]domain.Container{
+		{ID: "available", Name: "web", State: "running", Update: domain.UpdateAvailable},
+		{ID: "pending", Name: "worker", State: "running", Update: domain.UpdatePulledPendingRecreate},
+		{ID: "current", Name: "db", State: "running", Update: domain.UpdateCurrent},
+	}, "available", nil, false, time.Now(), layout, config.MemoryBoth)
+	plain := ansi.Strip(view)
+	if !strings.Contains(plain, "U  web") || !strings.Contains(plain, "R  worker") {
+		t.Fatalf("missing container update indicators: %q", plain)
+	}
+	if strings.Contains(plain, "=  db") {
+		t.Fatalf("current container must keep the update marker empty: %q", plain)
+	}
+}
+
+func TestContainerUpdateActionsSupportMixedMultipleSelection(t *testing.T) {
+	model := loadedSelectionModel(t)
+	model.images = []domain.Image{{ID: "one-image", Update: domain.UpdateAvailable}, {ID: "two-image", Update: domain.UpdateCurrent}}
+	model.snapshot.Containers[0].Image, model.snapshot.Containers[0].ImageID = "one:latest", "one-image"
+	model.snapshot.Containers[1].Image, model.snapshot.Containers[1].ImageID = "two:latest", "two-image"
+	model.containerUpdates["one"], model.containerUpdates["two"] = domain.UpdateAvailable, domain.UpdateCurrent
+	model.applyContainerUpdateStatuses()
+	model.selected = map[string]struct{}{"one": {}, "two": {}}
+	model.editing = true
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	menu := updated.(Model)
+	if got, want := fmt.Sprint(menu.actionChoices()), "[pull update stop restart delete cancel]"; got != want {
+		t.Fatalf("mixed container actions = %s, want %s", got, want)
+	}
+	view := menu.actionMenuView()
+	found := false
+	for _, section := range view.Sections {
+		found = found || strings.Contains(section.Body, "1 eligible, 1 skipped")
+	}
+	if !found {
+		t.Fatalf("mixed menu did not explain eligibility: %#v", view.Sections)
+	}
+}
+
+func TestFailedContainerUpdateAfterPullRemainsPendingApply(t *testing.T) {
+	model := loadedSelectionModel(t)
+	model.updates = testImageUpdateService()
+	model.snapshot.Containers[0].Image, model.snapshot.Containers[0].ImageID, model.snapshot.Containers[0].Update = "one:latest", "one-image", domain.UpdateAvailable
+	targets := model.containerTargetsForIDs([]string{"one"})
+
+	model.reconcileContainerUpdateResults(application.ActionUpdate, targets, []application.ActionResult{{ID: "one", Action: application.ActionUpdate, Err: errors.New("recreate failed"), Pulled: true}})
+	if pending, found := model.pendingRecreates["one"]; !found || pending.Reference != "one:latest" {
+		t.Fatalf("failed recreate did not preserve pending update: %#v", model.pendingRecreates)
+	}
+	menu := actionState{stage: actionMenu, resource: actionContainers, targets: model.containerTargetsForIDs([]string{"one"})}
+	model.action = menu
+	if got, want := fmt.Sprint(model.actionChoices()), "[apply_update stop restart delete cancel]"; got != want {
+		t.Fatalf("pending container actions = %s, want %s", got, want)
+	}
+}
+
+func TestComposeChildUpdateDelegatesOnceToStack(t *testing.T) {
+	pullCalls, upCalls := 0, 0
+	runtime := fakeRuntime{pullStackCalls: &pullCalls, upCalls: &upCalls}
+	model := NewModel(application.NewContainerService(runtime), config.MemoryBoth)
+	stack := domain.Stack{Name: "app", WorkingDir: "/srv/app", Files: []string{"/srv/app/compose.yaml"}, ContainerItems: []domain.Container{
+		{ID: "web", Name: "web", ComposeProject: "app", ImageID: "image", Update: domain.UpdateAvailable},
+		{ID: "worker", Name: "worker", ComposeProject: "app", ImageID: "image", Update: domain.UpdateAvailable},
+	}}
+	stackTarget := stack
+	targets := []actionTarget{{ID: "web", Name: "web", Update: domain.UpdateAvailable, Stack: &stackTarget, Service: "web"}, {ID: "worker", Name: "worker", Update: domain.UpdateAvailable, Stack: &stackTarget, Service: "worker"}}
+
+	results := model.runComposeContainerUpdate(context.Background(), application.ActionUpdate, targets)
+	if len(results) != 1 || results[0].ID != "app" || pullCalls != 1 || upCalls != 1 {
+		t.Fatalf("Compose update was not deduplicated by stack: results=%#v pull=%d up=%d", results, pullCalls, upCalls)
+	}
+}
+
+func TestComposeContainerUpdateConfirmationNamesStackOnce(t *testing.T) {
+	model := loadedSelectionModel(t)
+	stack := domain.Stack{Name: "app", WorkingDir: "/srv/app", Files: []string{"/srv/app/compose.yaml"}}
+	model.action = actionState{stage: actionConfirm, resource: actionContainers, index: 1, targets: []actionTarget{
+		{ID: "web", Name: "web-1", Update: domain.UpdateAvailable, Stack: &stack, Service: "web"},
+		{ID: "worker", Name: "worker-1", Update: domain.UpdateAvailable, Stack: &stack, Service: "worker"},
+	}}
+	banner := model.confirmationBanner()
+	if !strings.Contains(banner, "Target: app/web, app/worker on") || strings.Contains(banner, "web-1") || strings.Contains(banner, "worker-1") {
+		t.Fatalf("Compose confirmation did not identify stack scope: %q", banner)
+	}
+}
+
+func TestSuccessfulComposeServiceUpdateKeepsOtherServicePending(t *testing.T) {
+	model := loadedSelectionModel(t)
+	stack := domain.Stack{Name: "app", ContainerItems: []domain.Container{
+		{ID: "web", ComposeService: "web", Image: "web:latest", ImageID: "web-image", Update: domain.UpdateAvailable},
+		{ID: "worker", ComposeService: "worker", Image: "worker:latest", ImageID: "worker-image", Update: domain.UpdatePulledPendingRecreate},
+	}}
+	model.pendingRecreates["worker"] = pendingImageRecreate{ContainerID: "worker", ImageID: "worker-image", Reference: "worker:latest", Compose: true}
+	target := actionTarget{ID: "web", Name: "web", Update: domain.UpdateAvailable, Stack: &stack, Service: "web"}
+
+	model.reconcileContainerUpdateResults(application.ActionUpdate, []actionTarget{target}, []application.ActionResult{{ID: "app", Action: application.ActionUpdate, Pulled: true, Applied: true}})
+	if _, found := model.pendingRecreates["worker"]; !found {
+		t.Fatalf("service-scoped update cleared another service pending state: %#v", model.pendingRecreates)
+	}
+}
+
+func TestMixedStackUpdateExecutesOnlyEligibleStacks(t *testing.T) {
+	pullCalls, upCalls := 0, 0
+	model := NewModel(application.NewContainerService(fakeRuntime{pullStackCalls: &pullCalls, upCalls: &upCalls}), config.MemoryBoth)
+	model.stacks = []domain.Stack{
+		{Name: "eligible", WorkingDir: "/srv/eligible", Files: []string{"/srv/eligible/compose.yaml"}},
+		{Name: "current", WorkingDir: "/srv/current", Files: []string{"/srv/current/compose.yaml"}},
+	}
+	eligible, current := model.stacks[0], model.stacks[1]
+	model.action = actionState{resource: actionStacks, targets: []actionTarget{
+		{ID: eligible.Name, Name: eligible.Name, Update: domain.UpdateAvailable, Stack: &eligible},
+		{ID: current.Name, Name: current.Name, Update: domain.UpdateCurrent, Stack: &current},
+	}}
+
+	message := model.runAction(application.ActionUpdate)()
+	results := message.(actionFinishedMsg).results
+	if len(results) != 1 || results[0].ID != "eligible" || pullCalls != 1 || upCalls != 1 {
+		t.Fatalf("mixed stack update included skipped target: results=%#v pull=%d up=%d", results, pullCalls, upCalls)
+	}
+}
+
+func TestMixedStackMenuKeepsUpdateWhenAnotherStackLacksMetadata(t *testing.T) {
+	eligible := domain.Stack{Name: "eligible", WorkingDir: "/srv/eligible", Files: []string{"/srv/eligible/compose.yaml"}}
+	unavailable := domain.Stack{Name: "unavailable"}
+	targets := []actionTarget{
+		{ID: eligible.Name, State: "running", Update: domain.UpdateAvailable, Stack: &eligible},
+		{ID: unavailable.Name, State: "stopped", Unavailable: unavailable.DownUnavailableReason(), Stack: &unavailable},
+	}
+	if got, want := fmt.Sprint(stackActionChoices(targets)), "[pull update cancel]"; got != want {
+		t.Fatalf("mixed stack choices = %s, want %s", got, want)
+	}
+}
+
+func TestSuccessfulStackUpdateClearsAllPendingChildren(t *testing.T) {
+	model := loadedSelectionModel(t)
+	model.updates = testImageUpdateService()
+	stack := domain.Stack{Name: "app", ContainerItems: []domain.Container{
+		{ID: "pending", Image: "app:latest", ImageID: "old", Update: domain.UpdatePulledPendingRecreate},
+		{ID: "available", Image: "worker:latest", ImageID: "worker", Update: domain.UpdateAvailable},
+	}}
+	model.pendingRecreates["pending"] = pendingImageRecreate{ContainerID: "pending", ImageID: "old", Reference: "app:latest", Compose: true}
+	target := actionTarget{ID: "available", Name: "worker", Update: domain.UpdateAvailable, Stack: &stack}
+
+	model.reconcileContainerUpdateResults(application.ActionUpdate, []actionTarget{target}, []application.ActionResult{{ID: "app", Action: application.ActionUpdate, Pulled: true, Applied: true}})
+	if len(model.pendingRecreates) != 0 {
+		t.Fatalf("successful stack update left stale pending children: %#v", model.pendingRecreates)
+	}
+}
+
+func TestSnapshotPrunesPendingRecreateForReplacedContainerID(t *testing.T) {
+	model := loadedSelectionModel(t)
+	model.pendingRecreates["old"] = pendingImageRecreate{ContainerID: "old", ImageID: "image", Reference: "app:latest"}
+	model.snapshot.Containers = []domain.Container{{ID: "new", Name: "app", State: "running"}}
+	model.prunePendingRecreates()
+	if len(model.pendingRecreates) != 0 {
+		t.Fatalf("obsolete pending ID survived snapshot reconciliation: %#v", model.pendingRecreates)
 	}
 }
 
@@ -823,6 +1080,44 @@ func TestNetworkAndVolumeEditTablesShowActiveCheckboxCursor(t *testing.T) {
 	}
 }
 
+func TestNetworkAndVolumeEnterOpenIndividualDeleteAndDOpensDetails(t *testing.T) {
+	tests := []struct {
+		name     string
+		model    Model
+		resource actionResource
+		target   string
+	}{
+		{name: "network", model: loadedNetworkSelectionModel(t), resource: actionNetworks, target: "network"},
+		{name: "volume", model: loadedVolumeSelectionModel(t), resource: actionVolumes, target: "volume"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			updated, command := test.model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			menu := updated.(Model)
+			if command != nil || menu.action.stage != actionMenu || menu.action.resource != test.resource || len(menu.action.targets) != 1 || menu.action.targets[0].ID != test.target {
+				t.Fatalf("expected individual delete menu: %#v", menu.action)
+			}
+			if got := fmt.Sprint(menu.actionChoices()); got != "[delete cancel]" {
+				t.Fatalf("individual choices = %s", got)
+			}
+
+			updated, command = test.model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+			details := updated.(Model)
+			if command == nil || test.resource == actionNetworks && !details.networkDetailOpen || test.resource == actionVolumes && !details.volumeDetailOpen {
+				t.Fatalf("d did not open %s details", test.name)
+			}
+		})
+	}
+}
+
+func TestDOpensImageDetails(t *testing.T) {
+	model := loadedImageSelectionModel(t)
+	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if command == nil || !updated.(Model).imageDetailOpen || !updated.(Model).imageDetailLoading {
+		t.Fatal("d did not open image details")
+	}
+}
+
 func TestNetworkAndVolumeEditingOpenDeleteMenuAndConfirmWithY(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -901,13 +1196,77 @@ func TestModelPreservesSelectionDuringResize(t *testing.T) {
 	}
 }
 
-func TestEnterOpensDetailsForCurrentContainer(t *testing.T) {
+func TestEnterOpensActionsAndDOpensDetailsForCurrentContainer(t *testing.T) {
 	model := loadedSelectionModel(t)
 
 	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	menu := updated.(Model)
+	if command != nil || menu.action.stage != actionMenu || len(menu.action.targets) != 1 || menu.action.targets[0].ID != "one" {
+		t.Fatalf("expected individual action menu, got %#v", menu.action)
+	}
+
+	updated, command = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	opened := updated.(Model)
 	if command == nil || opened.panel != panelDetails || !opened.detailLoading {
-		t.Fatalf("expected details to open and load, got panel=%d loading=%v", opened.panel, opened.detailLoading)
+		t.Fatalf("expected d to open details, got panel=%d loading=%v", opened.panel, opened.detailLoading)
+	}
+}
+
+func TestSelectAllOnlyWorksInEditModeAndTogglesCheckboxes(t *testing.T) {
+	model := loadedSelectionModel(t)
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if updated.(Model).editing || len(updated.(Model).selected) != 0 {
+		t.Fatal("a must not enter edit mode")
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	updated, _ = updated.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	all := updated.(Model)
+	if !all.editing || len(all.selected) != len(all.snapshot.Containers) {
+		t.Fatalf("expected all containers selected in edit mode: %#v", all.selected)
+	}
+	updated, _ = all.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	none := updated.(Model)
+	if !none.editing || len(none.selected) != 0 {
+		t.Fatalf("expected empty selection while remaining in edit mode: %#v", none.selected)
+	}
+}
+
+func TestSelectAllCoversResourceViewsAndExpandedStackChildren(t *testing.T) {
+	images := loadedImageSelectionModel(t)
+	images.imageEditing = true
+	updated, _ := images.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if len(updated.(Model).selectedImages) != len(images.images) {
+		t.Fatal("expected all images selected")
+	}
+
+	networks := loadedNetworkSelectionModel(t)
+	networks.networkEditing = true
+	updated, _ = networks.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if len(updated.(Model).selectedNetworks) != len(networks.networks) {
+		t.Fatal("expected all networks selected")
+	}
+
+	volumes := loadedVolumeSelectionModel(t)
+	volumes.volumeEditing = true
+	updated, _ = volumes.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if len(updated.(Model).selectedVolumes) != len(volumes.volumes) {
+		t.Fatal("expected all volumes selected")
+	}
+
+	stacks := NewModel(application.NewContainerService(fakeRuntime{}), config.MemoryBoth)
+	stacks.active, stacks.stacksLoaded, stacks.stacksLoading = 1, true, false
+	stacks.stacks = []domain.Stack{{Name: "app", ContainerItems: []domain.Container{{ID: "one"}, {ID: "two"}}}, {Name: "other"}}
+	stacks.stackEditing = true
+	updated, _ = stacks.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if len(updated.(Model).selectedStacks) != 2 {
+		t.Fatalf("expected all stacks selected: %#v", updated.(Model).selectedStacks)
+	}
+	stacks.stackEditing = false
+	stacks.selectedStackName, stacks.expandedStackName, stacks.selectedStackContainerID, stacks.stackContainerEditing = "app", "app", "one", true
+	updated, _ = stacks.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if len(updated.(Model).selectedStackContainers) != 2 {
+		t.Fatalf("expected all expanded stack children selected: %#v", updated.(Model).selectedStackContainers)
 	}
 }
 
@@ -987,14 +1346,16 @@ func TestVisibleContainersKeepsSelectionInViewport(t *testing.T) {
 }
 
 type fakeRuntime struct {
-	snapshot     domain.Snapshot
-	images       []domain.Image
-	imageDetails domain.ImageDetails
-	stacks       []domain.Stack
-	networks     []domain.Network
-	volumes      []domain.Volume
-	resources    ports.ResourceLoad
-	err          error
+	snapshot       domain.Snapshot
+	images         []domain.Image
+	imageDetails   domain.ImageDetails
+	stacks         []domain.Stack
+	networks       []domain.Network
+	volumes        []domain.Volume
+	resources      ports.ResourceLoad
+	err            error
+	pullStackCalls *int
+	upCalls        *int
 }
 
 func (f fakeRuntime) Stacks(context.Context) ([]domain.Stack, error) { return f.stacks, f.err }
@@ -1421,10 +1782,33 @@ func (fakeRuntime) RemoveNetwork(context.Context, string) error { return nil }
 
 func (fakeRuntime) RemoveVolume(context.Context, string) error { return nil }
 
-func (fakeRuntime) Down(context.Context, domain.Stack) error         { return nil }
-func (fakeRuntime) Up(context.Context, domain.Stack) error           { return nil }
+func (fakeRuntime) Down(context.Context, domain.Stack) error { return nil }
+func (f fakeRuntime) Up(context.Context, domain.Stack) error {
+	if f.upCalls != nil {
+		*f.upCalls++
+	}
+	return nil
+}
 func (fakeRuntime) StopStack(context.Context, domain.Stack) error    { return nil }
 func (fakeRuntime) RestartStack(context.Context, domain.Stack) error { return nil }
+func (f fakeRuntime) PullStack(context.Context, domain.Stack) error {
+	if f.pullStackCalls != nil {
+		*f.pullStackCalls++
+	}
+	return nil
+}
+func (f fakeRuntime) PullStackServices(context.Context, domain.Stack, []string) error {
+	if f.pullStackCalls != nil {
+		*f.pullStackCalls++
+	}
+	return nil
+}
+func (f fakeRuntime) UpStackServices(context.Context, domain.Stack, []string) error {
+	if f.upCalls != nil {
+		*f.upCalls++
+	}
+	return nil
+}
 func (fakeRuntime) ComposeLogs(context.Context, domain.Stack, int) (ports.LogStream, error) {
 	return ports.LogStream{}, nil
 }

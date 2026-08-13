@@ -93,6 +93,31 @@ func TestScanComparesSharedReferenceAgainstEachImage(t *testing.T) {
 	}
 }
 
+func TestScanKeepsDifferentReferencesForSharedImageSeparate(t *testing.T) {
+	service := NewImageUpdateService(CommandExecutor(func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		for _, arg := range args {
+			if arg == "app:stable" || arg == "docker.io/library/app:stable" {
+				return []byte(`{"Descriptor":{"digest":"sha256:local"}}`), nil
+			}
+		}
+		return []byte(`{"Descriptor":{"digest":"sha256:new"}}`), nil
+	}), UpdateOptions{Enabled: true, Interval: time.Minute, Concurrency: 2})
+	images := []domain.Image{{ID: "sha256:shared", Tags: []string{"app:stable", "app:edge"}, RepoDigests: []string{"app@sha256:local"}}}
+	snapshot := domain.Snapshot{Containers: []domain.Container{
+		{ID: "stable", State: "running", Image: "app:stable", ImageID: "sha256:shared"},
+		{ID: "edge", State: "running", Image: "app:edge", ImageID: "sha256:shared"},
+	}}
+
+	results := service.Scan(context.Background(), snapshot, images)
+	statuses := make(map[string]domain.UpdateStatus, len(results))
+	for _, result := range results {
+		statuses[result.ContainerID] = result.Status
+	}
+	if statuses["stable"] != domain.UpdateCurrent || statuses["edge"] != domain.UpdateAvailable {
+		t.Fatalf("shared image references were collapsed: %#v", results)
+	}
+}
+
 func TestInvalidateForcesManifestRefresh(t *testing.T) {
 	var calls atomic.Int32
 	service := NewImageUpdateService(CommandExecutor(func(context.Context, string, ...string) ([]byte, error) {

@@ -14,6 +14,7 @@ import (
 	"github.com/moby/moby/api/pkg/stdcopy"
 	mobycontainer "github.com/moby/moby/api/types/container"
 	mobyimage "github.com/moby/moby/api/types/image"
+	mobymount "github.com/moby/moby/api/types/mount"
 	mobynetwork "github.com/moby/moby/api/types/network"
 	mobyvolume "github.com/moby/moby/api/types/volume"
 	"github.com/moby/moby/client"
@@ -380,6 +381,9 @@ func (r *Runtime) RecreateContainer(ctx context.Context, id string, reference st
 	if inspect.Container.Config.Labels["com.docker.compose.project"] != "" {
 		return fmt.Errorf("recreate %s: Docker Compose containers must be recreated through their stack", shortID(id))
 	}
+	if inspect.Container.HostConfig.AutoRemove {
+		return fmt.Errorf("recreate %s: auto-remove containers cannot be updated safely", shortID(id))
+	}
 
 	running := inspect.Container.State != nil && inspect.Container.State.Running
 	if running {
@@ -393,7 +397,9 @@ func (r *Runtime) RecreateContainer(ctx context.Context, id string, reference st
 
 	name := strings.TrimPrefix(inspect.Container.Name, "/")
 	if err := recreateInspectedContainer(ctx, apiClient, inspect, name, reference, running); err != nil {
-		restoreErr := recreateInspectedContainer(ctx, apiClient, inspect, name, inspect.Container.Image, running)
+		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		restoreErr := recreateInspectedContainer(restoreCtx, apiClient, inspect, name, inspect.Container.Image, running)
 		if restoreErr != nil {
 			return fmt.Errorf("recreate %s with %q: %w; restore with previous image failed: %v", shortID(id), reference, err, restoreErr)
 		}
@@ -406,6 +412,7 @@ func recreateInspectedContainer(ctx context.Context, apiClient *Client, inspect 
 	config := *inspect.Container.Config
 	config.Image = reference
 	hostConfig := *inspect.Container.HostConfig
+	hostConfig.Mounts = preserveAnonymousVolumes(hostConfig.Mounts, hostConfig.Binds, inspect.Container.Mounts)
 	networking := &mobynetwork.NetworkingConfig{}
 	if inspect.Container.NetworkSettings != nil {
 		networking.EndpointsConfig = make(map[string]*mobynetwork.EndpointSettings, len(inspect.Container.NetworkSettings.Networks))
@@ -428,6 +435,44 @@ func recreateInspectedContainer(ctx context.Context, apiClient *Client, inspect 
 		return fmt.Errorf("start replacement: %w", err)
 	}
 	return nil
+}
+
+func preserveAnonymousVolumes(configured []mobymount.Mount, binds []string, inspected []mobycontainer.MountPoint) []mobymount.Mount {
+	result := append([]mobymount.Mount(nil), configured...)
+	configuredTargets := make(map[string]struct{}, len(result))
+	for _, mount := range result {
+		configuredTargets[mount.Target] = struct{}{}
+	}
+	for target := range bindTargets(binds) {
+		configuredTargets[target] = struct{}{}
+	}
+	for _, mount := range inspected {
+		if mount.Type != mobymount.TypeVolume || mount.Name == "" {
+			continue
+		}
+		if _, found := configuredTargets[mount.Destination]; found {
+			continue
+		}
+		result = append(result, mobymount.Mount{Type: mobymount.TypeVolume, Source: mount.Name, Target: mount.Destination, ReadOnly: !mount.RW})
+		configuredTargets[mount.Destination] = struct{}{}
+	}
+	return result
+}
+
+func bindTargets(binds []string) map[string]struct{} {
+	targets := make(map[string]struct{}, len(binds))
+	for _, bind := range binds {
+		parts := strings.Split(bind, ":")
+		if len(parts) < 2 {
+			continue
+		}
+		index := len(parts) - 1
+		if len(parts) >= 3 {
+			index--
+		}
+		targets[parts[index]] = struct{}{}
+	}
+	return targets
 }
 
 func (r *Runtime) RemoveNetwork(ctx context.Context, id string) error {

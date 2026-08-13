@@ -46,6 +46,9 @@ type Runtime interface {
 	Up(ctx context.Context, stack domain.Stack) error
 	StopStack(ctx context.Context, stack domain.Stack) error
 	RestartStack(ctx context.Context, stack domain.Stack) error
+	PullStack(ctx context.Context, stack domain.Stack) error
+	PullStackServices(ctx context.Context, stack domain.Stack, services []string) error
+	UpStackServices(ctx context.Context, stack domain.Stack, services []string) error
 	Down(ctx context.Context, stack domain.Stack) error
 	ComposeLogs(ctx context.Context, stack domain.Stack, tail int) (LogStream, error)
 }

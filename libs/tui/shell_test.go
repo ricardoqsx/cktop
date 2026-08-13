@@ -28,6 +28,16 @@ func TestShellViewIncludesProductContent(t *testing.T) {
 	}
 }
 
+func TestShellRendersFooterNoticeBeforeHelpLine(t *testing.T) {
+	model := newShell(ShellOptions{Footer: "q quit", FooterNotice: "Docker Hub: run docker login", Views: []View{{Title: "Containers"}}})
+	view := ansi.Strip(model.View())
+	notice := strings.Index(view, "Docker Hub: run docker login")
+	help := strings.Index(view, "q quit")
+	if notice < 0 || help < 0 || notice > help {
+		t.Fatalf("footer notice was not rendered before help: %q", view)
+	}
+}
+
 func TestShellUsesFallbackTitle(t *testing.T) {
 	model := newShell(ShellOptions{})
 
@@ -44,6 +54,19 @@ func TestShellUsesFallbackView(t *testing.T) {
 	}
 	if model.views[0].Status != StatusEmpty {
 		t.Fatalf("expected empty fallback view, got %v", model.views[0].Status)
+	}
+}
+
+func TestDefaultLocalizerFormatsEnglishDecimalsAndPlurals(t *testing.T) {
+	localizer := DefaultLocalizer()
+	if got := localizer.Decimal(12.5, 2); got != "12.50" {
+		t.Fatalf("expected English decimal, got %q", got)
+	}
+	if got := localizer.Plural(MessageShellViewCount, 1); got != "1 view" {
+		t.Fatalf("expected singular view, got %q", got)
+	}
+	if got := localizer.Plural(MessageShellViewCount, 2); got != "2 views" {
+		t.Fatalf("expected plural views, got %q", got)
 	}
 }
 

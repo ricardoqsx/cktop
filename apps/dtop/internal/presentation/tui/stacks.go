@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/domain"
+	"github.com/ricardoqsx/cktop/apps/dtop/internal/i18n"
 	sharedui "github.com/ricardoqsx/cktop/libs/tui"
 )
 
@@ -13,21 +14,21 @@ func (m Model) stacksView(layout sharedui.Layout) sharedui.View {
 		return m.actionView()
 	}
 	if m.stacksLoading || !m.stacksLoaded {
-		return sharedui.View{Title: "Stacks", Status: sharedui.StatusLoading, Summary: "Loading Docker Compose stacks..."}
+		return sharedui.View{Title: m.localizer.Text(i18n.MessageTabStacks), Status: sharedui.StatusLoading, Summary: m.localizer.Text(i18n.MessageStacksLoading)}
 	}
 	if m.stacksErr != nil {
-		return sharedui.View{Title: "Stacks", Status: sharedui.StatusError, Summary: m.stacksErr.Error(), Sections: []sharedui.Section{{Title: "Next", Body: "Press r to retry."}}}
+		return sharedui.View{Title: m.localizer.Text(i18n.MessageTabStacks), Status: sharedui.StatusError, Summary: m.stacksErr.Error(), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageCommonRetry)}}}
 	}
 	if m.shellActive {
-		return sharedui.View{Title: "Container shell", Status: sharedui.StatusLoading, Summary: "Starting an interactive shell..."}
+		return sharedui.View{Title: m.localizer.Text(i18n.MessageContainerShellTitle), Status: sharedui.StatusLoading, Summary: m.localizer.Text(i18n.MessageContainerShellStarting)}
 	}
 	if m.shellErr != nil {
-		return sharedui.View{Title: "Stacks", Status: sharedui.StatusError, Summary: "Container shell failed: " + m.shellErr.Error(), Sections: []sharedui.Section{{Title: "Next", Body: "Check that the container is running, /bin/sh exists, and Docker permissions allow exec. Press s to try again."}}}
+		return sharedui.View{Title: m.localizer.Text(i18n.MessageTabStacks), Status: sharedui.StatusError, Summary: m.localizer.Text(i18n.MessageContainerShellFailed) + m.shellErr.Error(), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageContainerShellFailureNext)}}}
 	}
 	if len(m.stacks) == 0 && len(m.stackDiagnostics) == 0 {
-		return sharedui.View{Title: "Stacks", Status: sharedui.StatusEmpty, Summary: "No stacks found. Only stacks with Docker Compose labels can be discovered."}
+		return sharedui.View{Title: m.localizer.Text(i18n.MessageTabStacks), Status: sharedui.StatusEmpty, Summary: m.localizer.Text(i18n.MessageStacksEmpty)}
 	}
-	sections := []sharedui.Section{{Body: renderStacksWithColors(m.stacks, m.selectedStackName, m.selectedStackContainerID, m.selectedStacks, m.selectedStackContainers, m.stackEditing, m.stackContainerEditing, m.expandedStackName, layout, m.accentColor, m.focusColor)}}
+	sections := []sharedui.Section{{Body: renderStacksLocalized(m.stacks, m.selectedStackName, m.selectedStackContainerID, m.selectedStacks, m.selectedStackContainers, m.stackEditing, m.stackContainerEditing, m.expandedStackName, layout, m.accentColor, m.focusColor, m.localizer)}}
 	if stack := m.selectedStack(); stack != nil {
 		width := layout.ContentWidth
 		if width < 20 {
@@ -41,23 +42,27 @@ func (m Model) stacksView(layout sharedui.Layout) sharedui.View {
 		if len(stack.Files) > 0 {
 			files = strings.Join(stack.Files, ", ")
 		}
-		down := "available"
+		down := m.localizer.Text(i18n.MessageCommonAvailable)
 		if reason := stack.DownUnavailableReason(); reason != "" {
-			down = "unavailable: " + reason
+			down = m.localizer.Text(i18n.MessageCommonUnavailableReason, reason)
 		}
-		sections = append(sections, sharedui.Section{Title: "Selected stack", Body: "Working directory: " + fitCell(workingDir, width-19) + "\nCompose files: " + fitCell(files, width-15) + "\nDown: " + fitCell(down, width-6)})
+		sections = append(sections, sharedui.Section{Title: m.localizer.Text(i18n.MessageSectionSelectedStack), Body: strings.Join([]string{m.localizer.Text(i18n.MessageStackWorkingDirectory, workingDir), m.localizer.Text(i18n.MessageStackComposeFiles, files), m.localizer.Text(i18n.MessageStackDown, down)}, "\n")})
 	}
 	if len(m.stackDiagnostics) > 0 {
-		sections = append(sections, sharedui.Section{Title: "Registration diagnostics", Body: strings.Join(m.stackDiagnostics, "\n")})
+		sections = append(sections, sharedui.Section{Title: m.localizer.Text(i18n.MessageSectionRegistrationDiagnostics), Body: strings.Join(m.stackDiagnostics, "\n")})
 	}
-	return sharedui.View{Title: "Stacks", Status: sharedui.StatusReady, HideStatus: true, Sections: sections}
+	return sharedui.View{Title: m.localizer.Text(i18n.MessageTabStacks), Status: sharedui.StatusReady, HideStatus: true, Sections: sections}
 }
 
 func renderStacks(stacks []domain.Stack, selected, selectedContainer string, selections, selectedContainers map[string]struct{}, editing, childEditing bool, expanded string, layout sharedui.Layout) string {
-	return renderStacksWithColors(stacks, selected, selectedContainer, selections, selectedContainers, editing, childEditing, expanded, layout, "63", "15")
+	return renderStacksLocalized(stacks, selected, selectedContainer, selections, selectedContainers, editing, childEditing, expanded, layout, "63", "15", i18n.New("en"))
 }
 
 func renderStacksWithColors(stacks []domain.Stack, selected, selectedContainer string, selections, selectedContainers map[string]struct{}, editing, childEditing bool, expanded string, layout sharedui.Layout, accentColor, focusColor string) string {
+	return renderStacksLocalized(stacks, selected, selectedContainer, selections, selectedContainers, editing, childEditing, expanded, layout, accentColor, focusColor, i18n.New("en"))
+}
+
+func renderStacksLocalized(stacks []domain.Stack, selected, selectedContainer string, selections, selectedContainers map[string]struct{}, editing, childEditing bool, expanded string, layout sharedui.Layout, accentColor, focusColor string, localizer sharedui.Localizer) string {
 	// Stack rows use the resource table sizing rules but retain expandable detail rows.
 	width := layout.ContentWidth
 	if width < 20 {
@@ -65,6 +70,7 @@ func renderStacksWithColors(stacks []domain.Stack, selected, selectedContainer s
 	}
 	markerWidth := resourceMarkerWidth(editing || childEditing)
 	type column struct {
+		id    string
 		title string
 		width int
 	}
@@ -72,28 +78,35 @@ func renderStacksWithColors(stacks []domain.Stack, selected, selectedContainer s
 	if width >= 80 {
 		stateWidth = 20
 	}
-	cols := []column{{"", markerWidth}, {"NAME", 10}, {"STATE", stateWidth}}
+	cols := []column{{"marker", "", markerWidth}, {"update", "", 1}, {"name", localizer.Text(i18n.MessageColumnName), 10}, {"state", localizer.Text(i18n.MessageColumnState), stateWidth}}
 	if width >= 52 {
-		cols = append(cols, column{"CPU", 8}, column{"MEM", 12})
+		cols = append(cols, column{"cpu", localizer.Text(i18n.MessageColumnCPU), 8}, column{"memory", localizer.Text(i18n.MessageColumnMemory), 12})
 	}
 	if width >= 72 {
-		cols = append(cols, column{"HEALTH", 9})
+		cols = append(cols, column{"health", localizer.Text(i18n.MessageColumnHealth), 9})
 	}
 	if width >= 100 {
-		cols = append(cols, column{"SERVICES", 8})
+		cols = append(cols, column{"services", localizer.Text(i18n.MessageColumnServices), 8})
 	}
 	if width >= 120 {
-		cols = append(cols, column{"CONTAINERS", 10})
+		cols = append(cols, column{"containers", localizer.Text(i18n.MessageColumnContainers), 10})
 	}
 	fixed := (len(cols) - 1) * len(columnGap)
-	for i, col := range cols {
-		if i != 1 {
+	for _, col := range cols {
+		if col.id != "name" {
 			fixed += col.width
 		}
 	}
-	cols[1].width = width - fixed
-	if cols[1].width < 1 {
-		cols[1].width = 1
+	nameIndex := 0
+	for index, col := range cols {
+		if col.id == "name" {
+			nameIndex = index
+			break
+		}
+	}
+	cols[nameIndex].width = width - fixed
+	if cols[nameIndex].width < 1 {
+		cols[nameIndex].width = 1
 	}
 	render := func(stack domain.Stack, container *domain.Container, header bool, marker string) string {
 		values := make([]string, len(cols))
@@ -103,9 +116,9 @@ func renderStacksWithColors(stacks []domain.Stack, selected, selectedContainer s
 				if i == 0 {
 					value = marker
 				} else if container == nil {
-					value = stackCell(stack, col.title)
+					value = stackCellLocalized(stack, col.id, localizer)
 				} else {
-					value = stackContainerCell(*container, col.title)
+					value = stackContainerCellLocalized(*container, col.id, localizer)
 				}
 			}
 			values[i] = fitCell(value, col.width)
@@ -171,55 +184,67 @@ func renderStacksWithColors(stacks []domain.Stack, selected, selectedContainer s
 }
 
 func stackCell(stack domain.Stack, title string) string {
-	switch title {
-	case "NAME":
+	return stackCellLocalized(stack, strings.ToLower(title), i18n.New("en"))
+}
+
+func stackCellLocalized(stack domain.Stack, id string, localizer sharedui.Localizer) string {
+	switch id {
+	case "name":
 		return stack.Name
-	case "STATE":
-		return strings.ToUpper(stack.State)
-	case "CPU":
+	case "update":
+		return containerUpdateIndicator(stackUpdateStatus(stack))
+	case "state":
+		return strings.ToUpper(localizeState(localizer, stack.State))
+	case "cpu":
 		if stack.CPUAvailable {
-			return fmt.Sprintf("%.1f%%", stack.CPUPercent)
+			return localizer.Decimal(stack.CPUPercent, 1) + "%"
 		}
-	case "MEM":
+	case "memory":
 		if stack.MemoryAvailable {
 			if stack.MemoryLimit == 0 {
 				return formatBytes(stack.MemoryUsage)
 			}
 			return formatBytes(stack.MemoryUsage) + "/" + formatBytes(stack.MemoryLimit)
 		}
-	case "HEALTH":
+	case "health":
 		return "-"
-	case "SERVICES":
+	case "services":
 		return fmt.Sprintf("%d", len(stack.Services))
-	case "CONTAINERS":
+	case "containers":
 		return fmt.Sprintf("%d", stack.Containers)
 	}
 	return "-"
 }
 
 func stackContainerCell(container domain.Container, title string) string {
-	switch title {
-	case "NAME":
+	return stackContainerCellLocalized(container, strings.ToLower(title), i18n.New("en"))
+}
+
+func stackContainerCellLocalized(container domain.Container, id string, localizer sharedui.Localizer) string {
+	switch id {
+	case "name":
 		service := container.ComposeService
 		if service == "" {
-			service = "container"
+			service = localizer.Text(i18n.MessageStackContainerFallback)
 		}
 		return "+- " + service + "/" + container.Name
-	case "STATE":
-		return strings.ToUpper(container.State)
-	case "CPU":
+	case "update":
+		return containerUpdateIndicator(container.Update)
+	case "state":
+		return strings.ToUpper(localizeState(localizer, container.State))
+	case "cpu":
 		if container.CPUAvailable {
-			return fmt.Sprintf("%.1f%%", container.CPUPercent)
+			return localizer.Decimal(container.CPUPercent, 1) + "%"
 		}
-	case "MEM":
+	case "memory":
 		if container.MemoryAvailable {
 			if container.MemoryLimit == 0 {
 				return formatBytes(container.MemoryUsage)
 			}
 			return formatBytes(container.MemoryUsage) + "/" + formatBytes(container.MemoryLimit)
 		}
-	case "HEALTH":
-		return container.Health
+	case "health":
+		return localizeHealth(localizer, container.Health)
 	}
 	return ""
 }

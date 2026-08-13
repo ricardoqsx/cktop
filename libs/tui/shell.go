@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -27,29 +26,33 @@ type View struct {
 
 // ShellOptions configures the neutral TUI shell without domain-specific data.
 type ShellOptions struct {
-	Title       string
-	Subtitle    string
-	Views       []View
-	ActiveView  int
-	Footer      string
-	AccentColor string
-	Banner      string
-	BannerColor string
+	Title        string
+	Subtitle     string
+	Views        []View
+	ActiveView   int
+	Localizer    Localizer
+	Footer       string
+	FooterNotice string
+	AccentColor  string
+	Banner       string
+	BannerColor  string
 }
 
 type shellModel struct {
-	title       string
-	subtitle    string
-	views       []View
-	active      int
-	showHelp    bool
-	bindings    keyMap
-	width       int
-	height      int
-	theme       theme
-	footer      string
-	banner      string
-	bannerColor string
+	title        string
+	subtitle     string
+	views        []View
+	active       int
+	showHelp     bool
+	bindings     keyMap
+	width        int
+	height       int
+	theme        theme
+	localizer    Localizer
+	footer       string
+	footerNotice string
+	banner       string
+	bannerColor  string
 }
 
 type keyMap struct {
@@ -60,13 +63,13 @@ type keyMap struct {
 	back key.Binding
 }
 
-func defaultKeys() keyMap {
+func defaultKeys(localizer Localizer) keyMap {
 	return keyMap{
-		quit: key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
-		next: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next")),
-		prev: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "prev")),
-		help: key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		back: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		quit: key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", localizer.Text(MessageShellKeyQuit))),
+		next: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", localizer.Text(MessageShellKeyNext))),
+		prev: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", localizer.Text(MessageShellKeyPrevious))),
+		help: key.NewBinding(key.WithKeys("?"), key.WithHelp("?", localizer.Text(MessageShellKeyHelp))),
+		back: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", localizer.Text(MessageShellKeyBack))),
 	}
 }
 
@@ -76,12 +79,17 @@ func NewShell(options ShellOptions) tea.Model {
 }
 
 func newShell(options ShellOptions) shellModel {
+	localizer := options.Localizer
+	if localizer == nil {
+		localizer = DefaultLocalizer()
+	}
+
 	views := options.Views
 	if len(views) == 0 {
 		views = []View{{
-			Title:   "Overview",
+			Title:   localizer.Text(MessageShellFallbackViewTitle),
 			Status:  StatusEmpty,
-			Summary: "No content available yet.",
+			Summary: localizer.Text(MessageShellFallbackViewSummary),
 		}}
 	}
 
@@ -97,15 +105,17 @@ func newShell(options ShellOptions) shellModel {
 	}
 
 	return shellModel{
-		title:       fallback(options.Title, "cktop"),
-		subtitle:    options.Subtitle,
-		views:       views,
-		active:      active,
-		bindings:    defaultKeys(),
-		theme:       theme,
-		footer:      options.Footer,
-		banner:      options.Banner,
-		bannerColor: fallback(options.BannerColor, "33"),
+		title:        fallback(options.Title, localizer.Text(MessageShellFallbackTitle)),
+		subtitle:     options.Subtitle,
+		views:        views,
+		active:       active,
+		bindings:     defaultKeys(localizer),
+		theme:        theme,
+		localizer:    localizer,
+		footer:       options.Footer,
+		footerNotice: options.FooterNotice,
+		banner:       options.Banner,
+		bannerColor:  fallback(options.BannerColor, "33"),
 	}
 }
 
@@ -179,14 +189,14 @@ func (m shellModel) renderHeader(width int) string {
 func (m shellModel) renderTabs(layout Layout) string {
 	if layout.Mode == LayoutMinimal {
 		view := m.activeView()
-		return m.theme.activeTab.Render(view.Title) + m.theme.inactiveTab.Render(tabPosition(m.active, len(m.views)))
+		return m.theme.activeTab.Render(view.Title) + m.theme.inactiveTab.Render(m.tabPosition())
 	}
 
 	parts := make([]string, 0, len(m.views))
 	for index, view := range m.views {
 		label := view.Title
 		if view.Status != StatusReady {
-			label = view.Status.label() + " " + label
+			label = m.localizer.Text(view.Status.messageID()) + " " + label
 		}
 		if index == m.active {
 			parts = append(parts, m.theme.activeTab.Render(label))
@@ -201,11 +211,11 @@ func (m shellModel) renderTabs(layout Layout) string {
 func (m shellModel) renderContent() string {
 	if m.showHelp {
 		return strings.Join([]string{
-			m.theme.sectionTitle.Render("Help"),
-			"Tab        next view",
-			"Shift+Tab  previous view",
-			"Esc        close help",
-			"q          quit",
+			m.theme.sectionTitle.Render(m.localizer.Text(MessageShellHelpTitle)),
+			m.localizer.Text(MessageShellHelpNextView),
+			m.localizer.Text(MessageShellHelpPreviousView),
+			m.localizer.Text(MessageShellHelpClose),
+			m.localizer.Text(MessageShellHelpQuit),
 		}, "\n")
 	}
 
@@ -213,7 +223,7 @@ func (m shellModel) renderContent() string {
 	parts := make([]string, 0, len(view.Sections)+1)
 	var summary strings.Builder
 	if !view.HideStatus {
-		summary.WriteString(m.theme.status(view.Status).Render(strings.ToUpper(view.Status.label())))
+		summary.WriteString(m.theme.status(view.Status).Render(strings.ToUpper(m.localizer.Text(view.Status.messageID()))))
 	}
 	if view.Summary != "" {
 		if summary.Len() > 0 {
@@ -239,13 +249,13 @@ func (m shellModel) renderContent() string {
 
 func (m shellModel) renderContentDense(layout Layout) string {
 	if m.showHelp {
-		return fitBlock("Help: tab next | shift+tab prev | esc close | q quit", layout.ContentWidth)
+		return fitBlock(m.localizer.Text(MessageShellHelpCompact), layout.ContentWidth)
 	}
 
 	view := m.activeView()
 	status := ""
 	if !view.HideStatus {
-		status = m.theme.status(view.Status).Render(strings.ToUpper(view.Status.label()))
+		status = m.theme.status(view.Status).Render(strings.ToUpper(m.localizer.Text(view.Status.messageID())))
 	}
 	if view.Summary != "" {
 		if status != "" {
@@ -271,15 +281,18 @@ func (m shellModel) renderContentDense(layout Layout) string {
 func (m shellModel) renderFooter(layout Layout) string {
 	footer := m.footer
 	if footer == "" {
-		footer = "tab next  shift+tab prev  ? help  q quit"
+		footer = m.localizer.Text(MessageShellFooterDefault)
 	}
 	if layout.Mode == LayoutMinimal && m.footer == "" {
-		footer = "tab next  q quit"
+		footer = m.localizer.Text(MessageShellFooterMinimal)
 	}
 
-	parts := make([]string, 0, 2)
+	parts := make([]string, 0, 3)
 	if banner := m.renderBanner(layout); banner != "" {
 		parts = append(parts, banner)
+	}
+	if m.footerNotice != "" {
+		parts = append(parts, ansi.Truncate(m.theme.statusWarning.Bold(true).Render(m.footerNotice), layout.ContentWidth, "..."))
 	}
 	parts = append(parts, ansi.Truncate(m.theme.help.Render(footer), layout.ContentWidth, "..."))
 	return strings.Join(parts, "\n")
@@ -287,7 +300,11 @@ func (m shellModel) renderFooter(layout Layout) string {
 
 func (m shellModel) activeView() View {
 	if len(m.views) == 0 {
-		return View{Title: "Overview", Status: StatusEmpty, Summary: "No content available yet."}
+		return View{
+			Title:   m.localizer.Text(MessageShellFallbackViewTitle),
+			Status:  StatusEmpty,
+			Summary: m.localizer.Text(MessageShellFallbackViewSummary),
+		}
 	}
 
 	return m.views[m.active]
@@ -330,10 +347,10 @@ func fitBlock(value string, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func tabPosition(active, total int) string {
-	if total <= 0 {
+func (m shellModel) tabPosition() string {
+	if len(m.views) <= 0 {
 		return ""
 	}
 
-	return " " + strconv.Itoa(active+1) + "/" + strconv.Itoa(total)
+	return m.localizer.Text(MessageShellTabPosition, m.active+1, len(m.views))
 }

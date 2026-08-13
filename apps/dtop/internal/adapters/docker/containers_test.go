@@ -10,6 +10,7 @@ import (
 
 	mobycontainer "github.com/moby/moby/api/types/container"
 	mobyimage "github.com/moby/moby/api/types/image"
+	mobymount "github.com/moby/moby/api/types/mount"
 	mobynetwork "github.com/moby/moby/api/types/network"
 	mobyvolume "github.com/moby/moby/api/types/volume"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/domain"
@@ -299,6 +300,7 @@ func TestComposeLifecycleArgsAreExplicit(t *testing.T) {
 	stack := domain.Stack{Name: "app", WorkingDir: "/srv/app", Files: []string{"/srv/app/compose.yaml"}}
 	for operation, want := range map[string][]string{
 		"up":      {"compose", "--project-name", "app", "--project-directory", "/srv/app", "-f", "/srv/app/compose.yaml", "up", "-d"},
+		"pull":    {"compose", "--project-name", "app", "--project-directory", "/srv/app", "-f", "/srv/app/compose.yaml", "pull"},
 		"stop":    {"compose", "--project-name", "app", "--project-directory", "/srv/app", "-f", "/srv/app/compose.yaml", "stop"},
 		"restart": {"compose", "--project-name", "app", "--project-directory", "/srv/app", "-f", "/srv/app/compose.yaml", "restart"},
 	} {
@@ -311,6 +313,28 @@ func TestComposeLifecycleArgsAreExplicit(t *testing.T) {
 				t.Fatalf("%s must not remove volumes", operation)
 			}
 		}
+	}
+}
+
+func TestComposeServiceUpdateArgsRemainScoped(t *testing.T) {
+	stack := domain.Stack{Name: "app", WorkingDir: "/srv/app", Files: []string{"/srv/app/compose.yaml"}}
+	pull := composeArgs(stack, "pull", "web")
+	up := composeArgs(stack, "up", "-d", "--no-deps", "web")
+	if !reflect.DeepEqual(pull, []string{"compose", "--project-name", "app", "--project-directory", "/srv/app", "-f", "/srv/app/compose.yaml", "pull", "web"}) {
+		t.Fatalf("scoped pull args=%v", pull)
+	}
+	if !reflect.DeepEqual(up, []string{"compose", "--project-name", "app", "--project-directory", "/srv/app", "-f", "/srv/app/compose.yaml", "up", "-d", "--no-deps", "web"}) {
+		t.Fatalf("scoped up args=%v", up)
+	}
+}
+
+func TestPreserveAnonymousVolumesUsesExistingNames(t *testing.T) {
+	configured := []mobymount.Mount{{Type: mobymount.TypeBind, Source: "/srv/config", Target: "/config"}, {Type: mobymount.TypeVolume, Source: "named", Target: "/named"}}
+	inspected := []mobycontainer.MountPoint{{Type: mobymount.TypeVolume, Name: "anonymous-id", Destination: "/data", RW: true}, {Type: mobymount.TypeVolume, Name: "named", Destination: "/named", RW: true}}
+
+	got := preserveAnonymousVolumes(configured, []string{"named:/named"}, inspected)
+	if len(got) != 3 || got[2].Source != "anonymous-id" || got[2].Target != "/data" || got[2].ReadOnly {
+		t.Fatalf("anonymous volume was not preserved: %#v", got)
 	}
 }
 

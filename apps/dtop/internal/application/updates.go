@@ -116,7 +116,11 @@ func (s *ImageUpdateService) Scan(ctx context.Context, snapshot domain.Snapshot,
 	for _, image := range images {
 		byID[trimImageID(image.ID)] = image
 	}
-	refs := make(map[string][]string)
+	type scanTarget struct {
+		containerID string
+		imageID     string
+	}
+	refs := make(map[string][]scanTarget)
 	for _, container := range snapshot.Containers {
 		if container.State != "running" {
 			continue
@@ -130,7 +134,7 @@ func (s *ImageUpdateService) Scan(ctx context.Context, snapshot domain.Snapshot,
 			id = imageIDForReference(reference, images)
 		}
 		if id != "" {
-			refs[reference] = append(refs[reference], id)
+			refs[reference] = append(refs[reference], scanTarget{containerID: container.ID, imageID: id})
 		}
 	}
 	results := make(map[string]domain.ImageUpdate)
@@ -142,22 +146,26 @@ func (s *ImageUpdateService) Scan(ctx context.Context, snapshot domain.Snapshot,
 		go func() {
 			defer wait.Done()
 			for ref := range jobs {
-				ids := refs[ref]
+				targets := refs[ref]
 				taggedID := imageIDForReference(ref, images)
-				updates := make([]domain.ImageUpdate, 0, len(ids))
-				for _, id := range ids {
-					status, reason := s.check(ctx, ref, byID[id])
-					if taggedID != "" && taggedID != id {
+				updates := make([]domain.ImageUpdate, 0, len(targets))
+				for _, target := range targets {
+					status, reason := s.check(ctx, ref, byID[target.imageID])
+					if taggedID != "" && taggedID != target.imageID {
 						status, reason = s.check(ctx, ref, byID[taggedID])
 						if status == domain.UpdateCurrent {
 							status, reason = domain.UpdatePulledPendingRecreate, "pulled image differs from running image"
 						}
 					}
-					updates = append(updates, domain.ImageUpdate{ImageID: id, Status: status, Reason: reason})
+					updates = append(updates, domain.ImageUpdate{ContainerID: target.containerID, ImageID: target.imageID, Reference: ref, Status: status, Reason: reason})
 				}
 				mu.Lock()
 				for _, update := range updates {
-					results[update.ImageID] = update
+					key := update.ContainerID
+					if key == "" {
+						key = update.Reference + "|" + update.ImageID
+					}
+					results[key] = update
 				}
 				mu.Unlock()
 			}

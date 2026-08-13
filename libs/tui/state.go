@@ -12,19 +12,19 @@ const (
 	StatusUnavailable
 )
 
-func (s Status) label() string {
+func (s Status) messageID() string {
 	switch s {
 	case StatusLoading:
-		return "loading"
+		return MessageShellStatusLoading
 	case StatusEmpty:
-		return "empty"
+		return MessageShellStatusEmpty
 	case StatusWarning:
-		return "warning"
+		return MessageShellStatusWarning
 	case StatusError:
-		return "error"
+		return MessageShellStatusError
 	case StatusUnavailable:
-		return "unavailable"
+		return MessageShellStatusUnavailable
 	default:
-		return "ready"
+		return MessageShellStatusReady
 	}
 }

@@ -38,6 +38,7 @@ type Container struct {
 	ComposeService     string
 	ComposeWorkingDir  string
 	ComposeConfigFiles string
+	Update             UpdateStatus
 }
 
 type Snapshot struct {

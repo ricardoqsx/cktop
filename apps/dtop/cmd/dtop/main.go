@@ -10,6 +10,7 @@ import (
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/adapters/docker"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/application"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/config"
+	"github.com/ricardoqsx/cktop/apps/dtop/internal/i18n"
 	dtoptui "github.com/ricardoqsx/cktop/apps/dtop/internal/presentation/tui"
 )
 
@@ -29,7 +30,7 @@ func main() {
 	updates := application.NewImageUpdateService(application.CommandExecutor(func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return exec.CommandContext(ctx, name, args...).CombinedOutput()
 	}), application.UpdateOptions{Enabled: settings.Updates.Enabled, Interval: settings.Updates.Interval, Concurrency: settings.Updates.Concurrency})
-	model := dtoptui.NewModelWithUpdates(service, settings.Display, updates, application.DockerHubLoginConfigured, settings.ComposeDiagnostics...)
+	model := dtoptui.NewModelWithUpdatesAndLocalizer(service, settings.Display, updates, application.DockerHubLoginConfigured, i18n.NewFromEnvironment(), settings.ComposeDiagnostics...)
 
 	_, err = tea.NewProgram(model, tea.WithAltScreen()).Run()
 	if err != nil {

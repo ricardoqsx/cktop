@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/domain"
@@ -54,6 +55,44 @@ func TestRecreateImageContainersContinuesAfterFailure(t *testing.T) {
 	}
 	if len(results) != 2 || results[0].Err != nil || results[1].Err == nil {
 		t.Fatalf("unexpected recreate results: %#v", results)
+	}
+}
+
+func TestUpdateContainersDeduplicatesPullAndReportsEachContainer(t *testing.T) {
+	runtime := &fakeRuntime{}
+	targets := []RecreateTarget{{ID: "web", Reference: "app:latest"}, {ID: "worker", Reference: "app:latest"}}
+
+	results := NewContainerService(runtime).UpdateContainers(context.Background(), targets)
+	if got, want := fmt.Sprint(runtime.actions), "[pull:app:latest recreate:web:app:latest recreate:worker:app:latest]"; got != want {
+		t.Fatalf("update calls = %s, want %s", got, want)
+	}
+	if len(results) != 2 || !results[0].Pulled || !results[0].Applied || !results[1].Pulled || !results[1].Applied {
+		t.Fatalf("unexpected update results: %#v", results)
+	}
+}
+
+func TestUpdateContainersSkipsRecreateAfterPullFailure(t *testing.T) {
+	runtime := &fakeRuntime{errors: map[string]error{"app:latest": errors.New("pull failed")}}
+	results := NewContainerService(runtime).UpdateContainers(context.Background(), []RecreateTarget{{ID: "web", Reference: "app:latest"}})
+
+	if got, want := fmt.Sprint(runtime.actions), "[pull:app:latest]"; got != want {
+		t.Fatalf("update calls = %s, want %s", got, want)
+	}
+	if len(results) != 1 || results[0].Err == nil || results[0].Pulled || results[0].Applied {
+		t.Fatalf("unexpected failed update result: %#v", results)
+	}
+}
+
+func TestUpdateStackPullsBeforeUp(t *testing.T) {
+	runtime := &fakeRuntime{}
+	stack := domain.Stack{Name: "app", WorkingDir: "/srv/app", Files: []string{"/srv/app/compose.yaml"}}
+	results := NewContainerService(runtime).ActStacks(context.Background(), ActionUpdate, []domain.Stack{stack})
+
+	if got, want := fmt.Sprint(runtime.actions), "[pull-stack:app up:app]"; got != want {
+		t.Fatalf("stack update calls = %s, want %s", got, want)
+	}
+	if len(results) != 1 || !results[0].Pulled || !results[0].Applied || results[0].Err != nil {
+		t.Fatalf("unexpected stack update result: %#v", results)
 	}
 }
 
@@ -382,6 +421,18 @@ func (f *fakeRuntime) StopStack(_ context.Context, stack domain.Stack) error {
 }
 func (f *fakeRuntime) RestartStack(_ context.Context, stack domain.Stack) error {
 	f.actions = append(f.actions, "restart-stack:"+stack.Name)
+	return f.errors[stack.Name]
+}
+func (f *fakeRuntime) PullStack(_ context.Context, stack domain.Stack) error {
+	f.actions = append(f.actions, "pull-stack:"+stack.Name)
+	return f.errors[stack.Name]
+}
+func (f *fakeRuntime) PullStackServices(_ context.Context, stack domain.Stack, services []string) error {
+	f.actions = append(f.actions, "pull-stack-services:"+stack.Name+":"+strings.Join(services, ","))
+	return f.errors[stack.Name]
+}
+func (f *fakeRuntime) UpStackServices(_ context.Context, stack domain.Stack, services []string) error {
+	f.actions = append(f.actions, "up-stack-services:"+stack.Name+":"+strings.Join(services, ","))
 	return f.errors[stack.Name]
 }
 func (f *fakeRuntime) ComposeLogs(context.Context, domain.Stack, int) (ports.LogStream, error) {

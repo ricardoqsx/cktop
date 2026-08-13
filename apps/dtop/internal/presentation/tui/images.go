@@ -6,21 +6,27 @@ import (
 	"time"
 
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/domain"
+	"github.com/ricardoqsx/cktop/apps/dtop/internal/i18n"
 	sharedui "github.com/ricardoqsx/cktop/libs/tui"
 )
 
 type imageColumn struct {
+	id    string
 	title string
 	width int
 	value func(domain.Image, time.Time) string
 }
 
 func renderImages(images []domain.Image, selectedID string, selected map[string]struct{}, editing bool, layout sharedui.Layout, now time.Time) string {
-	return renderImagesWithColors(images, selectedID, selected, editing, layout, now, "63", "15")
+	return renderImagesLocalized(images, selectedID, selected, editing, layout, now, "63", "15", i18n.New("en"))
 }
 
 func renderImagesWithColors(images []domain.Image, selectedID string, selected map[string]struct{}, editing bool, layout sharedui.Layout, now time.Time, accentColor, focusColor string) string {
-	columns := imageColumns(layout.ContentWidth, editing)
+	return renderImagesLocalized(images, selectedID, selected, editing, layout, now, accentColor, focusColor, i18n.New("en"))
+}
+
+func renderImagesLocalized(images []domain.Image, selectedID string, selected map[string]struct{}, editing bool, layout sharedui.Layout, now time.Time, accentColor, focusColor string, localizer sharedui.Localizer) string {
+	columns := imageColumnsLocalized(layout.ContentWidth, editing, localizer)
 	rows := visibleImages(images, selectedID, visibleRowCount(layout))
 	var builder strings.Builder
 	builder.WriteString(renderImageRow(columns, domain.Image{}, true, now, " "))
@@ -53,6 +59,10 @@ func renderImagesWithColors(images []domain.Image, selectedID string, selected m
 }
 
 func imageColumns(width int, editing bool) []imageColumn {
+	return imageColumnsLocalized(width, editing, i18n.New("en"))
+}
+
+func imageColumnsLocalized(width int, editing bool, localizer sharedui.Localizer) []imageColumn {
 	if width < 20 {
 		width = 20
 	}
@@ -61,23 +71,23 @@ func imageColumns(width int, editing bool) []imageColumn {
 		markerWidth = 4
 	}
 	columns := []imageColumn{
-		{title: "", width: markerWidth},
-		{title: "NAME", width: 10, value: func(image domain.Image, _ time.Time) string { return image.Name }},
+		{id: "marker", title: "", width: markerWidth},
+		{id: "name", title: localizer.Text(i18n.MessageColumnName), width: 10, value: func(image domain.Image, _ time.Time) string { return image.Name }},
 	}
 	if width >= 36 {
-		columns = append(columns, imageColumn{title: "UPDATE", width: 6, value: func(image domain.Image, _ time.Time) string { return imageUpdateIndicator(image.Update) }})
+		columns = append(columns, imageColumn{id: "update", title: localizer.Text(i18n.MessageColumnUpdate), width: 6, value: func(image domain.Image, _ time.Time) string { return imageUpdateIndicator(image.Update) }})
 	}
 	if width >= 48 {
-		columns = append(columns, imageColumn{title: "SIZE", width: 8, value: func(image domain.Image, _ time.Time) string { return formatBytes(image.Size) }})
+		columns = append(columns, imageColumn{id: "size", title: localizer.Text(i18n.MessageColumnSize), width: 8, value: func(image domain.Image, _ time.Time) string { return formatBytes(image.Size) }})
 	}
 	if width >= 68 {
-		columns = append(columns, imageColumn{title: "USED", width: 12, value: func(image domain.Image, _ time.Time) string { return imageUsage(image) }})
+		columns = append(columns, imageColumn{id: "used", title: localizer.Text(i18n.MessageColumnUsed), width: 12, value: func(image domain.Image, _ time.Time) string { return imageUsageLocalized(image, localizer) }})
 	}
 	if width >= 84 {
-		columns = append(columns, imageColumn{title: "AGE", width: 6, value: func(image domain.Image, now time.Time) string { return formatImageAge(image.Created, now) }})
+		columns = append(columns, imageColumn{id: "age", title: localizer.Text(i18n.MessageColumnAge), width: 6, value: func(image domain.Image, now time.Time) string { return formatImageAge(image.Created, now) }})
 	}
 	if width >= 120 {
-		columns = append(columns, imageColumn{title: "ID", width: 12, value: func(image domain.Image, _ time.Time) string { return image.ShortID }})
+		columns = append(columns, imageColumn{id: "id", title: localizer.Text(i18n.MessageColumnID), width: 12, value: func(image domain.Image, _ time.Time) string { return image.ShortID }})
 	}
 	fixed := (len(columns) - 1) * len(columnGap)
 	for index, column := range columns {
@@ -123,16 +133,17 @@ func renderImageRow(columns []imageColumn, image domain.Image, header bool, now 
 }
 
 func imageUsage(image domain.Image) string {
+	return imageUsageLocalized(image, i18n.New("en"))
+}
+
+func imageUsageLocalized(image domain.Image, localizer sharedui.Localizer) string {
 	if !image.UsageKnown {
 		return "-"
 	}
 	if image.Dangling {
-		return "dangling"
+		return localizer.Text(i18n.MessageCommonDangling)
 	}
-	if image.Containers == 1 {
-		return "1 container"
-	}
-	return strings.TrimSpace(strings.Join([]string{formatCount(image.Containers), "containers"}, " "))
+	return localizer.Plural(i18n.MessageUsageContainers, int(image.Containers))
 }
 
 func formatCount(value int64) string {
