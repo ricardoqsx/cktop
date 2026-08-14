@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -38,6 +39,7 @@ type ActionResult struct {
 	ID      string
 	Action  Action
 	Err     error
+	Warning error
 	Pulled  bool
 	Applied bool
 }
@@ -48,13 +50,15 @@ type RecreateTarget struct {
 }
 
 type StackUpdateTarget struct {
-	Stack    domain.Stack
-	Services []string
+	Stack      domain.Stack
+	Services   []string
+	References map[string]string
 }
 
 type ContainerService struct {
 	runtime         ports.Runtime
 	composeProjects []ComposeProject
+	composeUpdates  *composeUpdateCoordinator
 }
 
 type ComposeProject struct {
@@ -65,7 +69,11 @@ type ComposeProject struct {
 }
 
 func NewContainerService(runtime ports.Runtime, composeProjects ...ComposeProject) ContainerService {
-	return ContainerService{runtime: runtime, composeProjects: composeProjects}
+	return NewContainerServiceWithComposeUpdates(runtime, nil, composeProjects...)
+}
+
+func NewContainerServiceWithComposeUpdates(runtime ports.Runtime, store ports.ComposeUpdateStore, composeProjects ...ComposeProject) ContainerService {
+	return ContainerService{runtime: runtime, composeProjects: composeProjects, composeUpdates: newComposeUpdateCoordinator(store)}
 }
 
 func (s ContainerService) Load(ctx context.Context) (domain.Snapshot, error) {
@@ -75,6 +83,8 @@ func (s ContainerService) Load(ctx context.Context) (domain.Snapshot, error) {
 func (s ContainerService) LoadResources(ctx context.Context) (ports.ResourceLoad, error) {
 	resources, err := s.runtime.LoadResources(ctx)
 	resources.Stacks = MergeStacks(resources.Stacks, s.composeProjects)
+	s.refreshComposeUpdateState(ctx, resources.Stacks)
+	resources.Stacks = s.decorateComposeStacks(resources.Stacks)
 	return resources, err
 }
 
@@ -203,12 +213,14 @@ func RebuildStacks(snapshot domain.Snapshot, projects []ComposeProject) []domain
 }
 
 func (s ContainerService) RebuildStacks(snapshot domain.Snapshot) []domain.Stack {
-	return RebuildStacks(snapshot, s.composeProjects)
+	return s.decorateComposeStacks(RebuildStacks(snapshot, s.composeProjects))
 }
 
 func (s ContainerService) Stacks(ctx context.Context) ([]domain.Stack, error) {
 	stacks, err := s.runtime.Stacks(ctx)
-	return MergeStacks(stacks, s.composeProjects), err
+	stacks = MergeStacks(stacks, s.composeProjects)
+	s.refreshComposeUpdateState(ctx, stacks)
+	return s.decorateComposeStacks(stacks), err
 }
 
 func MergeStacks(detected []domain.Stack, projects []ComposeProject) []domain.Stack {
@@ -219,6 +231,7 @@ func MergeStacks(detected []domain.Stack, projects []ComposeProject) []domain.St
 	}
 	for _, project := range projects {
 		if index, found := byName[project.Name]; found {
+			stacks[index].Registered = true
 			stacks[index].WorkingDir = project.WorkingDir
 			stacks[index].Files = append([]string(nil), project.Files...)
 			stacks[index].MetadataReason = ""
@@ -235,7 +248,7 @@ func MergeStacks(detected []domain.Stack, projects []ComposeProject) []domain.St
 		if len(project.MissingFiles) > 0 {
 			reason = "registered Compose config file is unavailable"
 		}
-		stacks = append(stacks, domain.Stack{Name: project.Name, State: state, WorkingDir: project.WorkingDir, Files: append([]string(nil), project.Files...), MetadataReason: reason})
+		stacks = append(stacks, domain.Stack{Name: project.Name, Registered: true, State: state, WorkingDir: project.WorkingDir, Files: append([]string(nil), project.Files...), MetadataReason: reason})
 	}
 	sort.SliceStable(stacks, func(i, j int) bool { return strings.ToLower(stacks[i].Name) < strings.ToLower(stacks[j].Name) })
 	return stacks
@@ -253,28 +266,50 @@ func (s ContainerService) actStacks(ctx context.Context, action Action, stacks [
 	results := make([]ActionResult, 0, len(stacks))
 	for _, stack := range stacks {
 		result := ActionResult{ID: stack.Name, Action: action}
+		release := func() {}
+		if stack.Registered || action == ActionUp {
+			lockedRelease, lockErr := s.composeUpdates.beginMutation()
+			if lockedRelease != nil {
+				release = lockedRelease
+			}
+			if lockErr != nil && (action == ActionUp || isComposeUpdateAction(action)) {
+				result.Err = fmt.Errorf("lock Compose update state: %w", lockErr)
+			}
+		}
 		if reason := stack.DownUnavailableReason(); reason != "" {
 			result.Err = fmt.Errorf("%s unavailable: %s", action, reason)
-		} else {
+		} else if result.Err == nil {
 			switch action {
 			case ActionUp:
-				result.Err = s.runtime.Up(ctx, stack)
+				if result.Err = s.composeUpBlocked(ctx, stack); result.Err == nil {
+					result.Err = s.runtime.Up(ctx, stack)
+				}
 			case ActionStop:
 				result.Err = s.runtime.StopStack(ctx, stack)
 			case ActionRestart:
 				result.Err = s.runtime.RestartStack(ctx, stack)
 			case ActionPull:
-				result.Err = s.runtime.PullStack(ctx, stack)
-				result.Pulled = result.Err == nil
+				_, result.Pulled, result.Err, result.Warning = s.pullComposeProject(ctx, stack, nil, nil, func(services []string) error {
+					return s.runtime.PullStackServices(ctx, stack, services)
+				})
 			case ActionUpdate:
-				result.Err = s.runtime.PullStack(ctx, stack)
-				result.Pulled = result.Err == nil
+				pulled, pulledOK, pullErr, pullWarning := s.pullComposeProject(ctx, stack, nil, nil, func(services []string) error {
+					return s.runtime.PullStackServices(ctx, stack, services)
+				})
+				result.Pulled, result.Err, result.Warning = pulledOK, pullErr, pullWarning
 				if result.Err == nil {
-					result.Err = s.runtime.Up(ctx, stack)
+					pullWarning := result.Warning
+					var applyWarning error
+					_, result.Err, applyWarning = s.applyComposeProject(ctx, stack, pulled.services, nil, func() error {
+						return s.runtime.Up(ctx, stack)
+					})
+					result.Warning = errors.Join(pullWarning, applyWarning)
 					result.Applied = result.Err == nil
 				}
 			case ActionApply:
-				result.Err = s.runtime.Up(ctx, stack)
+				_, result.Err, result.Warning = s.applyComposeProject(ctx, stack, nil, nil, func() error {
+					return s.runtime.Up(ctx, stack)
+				})
 				result.Applied = result.Err == nil
 			case ActionDown:
 				result.Err = s.runtime.Down(ctx, stack)
@@ -282,6 +317,7 @@ func (s ContainerService) actStacks(ctx context.Context, action Action, stacks [
 				result.Err = fmt.Errorf("unsupported stack action %q", action)
 			}
 		}
+		release()
 		results = append(results, result)
 	}
 	return results
@@ -416,26 +452,46 @@ func (s ContainerService) UpdateStackServices(ctx context.Context, action Action
 	results := make([]ActionResult, 0, len(targets))
 	for _, target := range targets {
 		result := ActionResult{ID: target.Stack.Name, Action: action}
+		release, lockErr := s.composeUpdates.beginMutation()
+		if lockErr != nil {
+			result.Err = fmt.Errorf("lock Compose update state: %w", lockErr)
+			results = append(results, result)
+			continue
+		}
 		switch action {
 		case ActionPull:
-			result.Err = s.runtime.PullStackServices(ctx, target.Stack, target.Services)
-			result.Pulled = result.Err == nil
+			_, result.Pulled, result.Err, result.Warning = s.pullComposeProject(ctx, target.Stack, target.Services, target.References, func(services []string) error {
+				return s.runtime.PullStackServices(ctx, target.Stack, services)
+			})
 		case ActionUpdate:
-			result.Err = s.runtime.PullStackServices(ctx, target.Stack, target.Services)
-			result.Pulled = result.Err == nil
+			_, result.Pulled, result.Err, result.Warning = s.pullComposeProject(ctx, target.Stack, target.Services, target.References, func(services []string) error {
+				return s.runtime.PullStackServices(ctx, target.Stack, services)
+			})
 			if result.Err == nil {
-				result.Err = s.runtime.UpStackServices(ctx, target.Stack, target.Services)
+				pullWarning := result.Warning
+				var applyWarning error
+				_, result.Err, applyWarning = s.applyComposeProject(ctx, target.Stack, target.Services, target.References, func() error {
+					return s.runtime.UpStackServices(ctx, target.Stack, target.Services)
+				})
+				result.Warning = errors.Join(pullWarning, applyWarning)
 				result.Applied = result.Err == nil
 			}
 		case ActionApply:
-			result.Err = s.runtime.UpStackServices(ctx, target.Stack, target.Services)
+			_, result.Err, result.Warning = s.applyComposeProject(ctx, target.Stack, target.Services, target.References, func() error {
+				return s.runtime.UpStackServices(ctx, target.Stack, target.Services)
+			})
 			result.Applied = result.Err == nil
 		default:
 			result.Err = fmt.Errorf("unsupported stack update action %q", action)
 		}
+		release()
 		results = append(results, result)
 	}
 	return results
+}
+
+func isComposeUpdateAction(action Action) bool {
+	return action == ActionPull || action == ActionUpdate || action == ActionApply
 }
 
 func (s ContainerService) recreateContainer(ctx context.Context, target RecreateTarget) error {

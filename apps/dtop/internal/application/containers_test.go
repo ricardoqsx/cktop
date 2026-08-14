@@ -84,11 +84,17 @@ func TestUpdateContainersSkipsRecreateAfterPullFailure(t *testing.T) {
 }
 
 func TestUpdateStackPullsBeforeUp(t *testing.T) {
-	runtime := &fakeRuntime{}
-	stack := domain.Stack{Name: "app", WorkingDir: "/srv/app", Files: []string{"/srv/app/compose.yaml"}}
+	runtime := &fakeRuntime{
+		composeConfig: []ports.ComposeServiceImage{{Service: "web", Reference: "app:latest"}},
+		images:        []domain.Image{{ID: "sha256:old-image", Tags: []string{"app:latest"}, RepoDigests: []string{"docker.io/library/app@sha256:old"}}},
+		pullImages:    []domain.Image{{ID: "sha256:new-image", Tags: []string{"app:latest"}, RepoDigests: []string{"docker.io/library/app@sha256:new"}}},
+		snapshot:      domain.Snapshot{Containers: []domain.Container{{ComposeProject: "app", ComposeService: "web", ImageID: "sha256:old-image"}}},
+		upSnapshot:    domain.Snapshot{Containers: []domain.Container{{ComposeProject: "app", ComposeService: "web", ImageID: "sha256:new-image"}}},
+	}
+	stack := domain.Stack{Name: "app", Registered: true, WorkingDir: "/srv/app", Files: []string{"/srv/app/compose.yaml"}}
 	results := NewContainerService(runtime).ActStacks(context.Background(), ActionUpdate, []domain.Stack{stack})
 
-	if got, want := fmt.Sprint(runtime.actions), "[pull-stack:app up:app]"; got != want {
+	if got, want := fmt.Sprint(runtime.actions), "[pull-stack-services:app:web up:app]"; got != want {
 		t.Fatalf("stack update calls = %s, want %s", got, want)
 	}
 	if len(results) != 1 || !results[0].Pulled || !results[0].Applied || results[0].Err != nil {
@@ -318,21 +324,29 @@ func TestDownStacksReturnsUnavailableResultWithoutCallingRuntime(t *testing.T) {
 }
 
 type fakeRuntime struct {
-	snapshot  domain.Snapshot
-	images    []domain.Image
-	stacks    []domain.Stack
-	networks  []domain.Network
-	volumes   []domain.Volume
-	resources ports.ResourceLoad
-	err       error
-	errors    map[string]error
-	actions   []string
+	snapshot      domain.Snapshot
+	images        []domain.Image
+	pullImages    []domain.Image
+	upSnapshot    domain.Snapshot
+	stacks        []domain.Stack
+	networks      []domain.Network
+	volumes       []domain.Volume
+	resources     ports.ResourceLoad
+	composeConfig []ports.ComposeServiceImage
+	err           error
+	errors        map[string]error
+	actionErrors  map[string]error
+	actions       []string
 }
 
 func (f *fakeRuntime) Stacks(context.Context) ([]domain.Stack, error) { return f.stacks, f.err }
 
 func (f *fakeRuntime) LoadResources(context.Context) (ports.ResourceLoad, error) {
 	return f.resources, f.err
+}
+
+func (f *fakeRuntime) ComposeConfig(context.Context, domain.Stack) ([]ports.ComposeServiceImage, error) {
+	return append([]ports.ComposeServiceImage(nil), f.composeConfig...), f.err
 }
 
 func (f *fakeRuntime) Snapshot(context.Context) (domain.Snapshot, error) {
@@ -407,13 +421,22 @@ func (f *fakeRuntime) RemoveVolume(_ context.Context, name string) error {
 	return f.errors[name]
 }
 
+func (f *fakeRuntime) Prune(_ context.Context, args ...string) (string, error) {
+	f.actions = append(f.actions, "prune:"+strings.Join(args, ":"))
+	return "", f.err
+}
+
 func (f *fakeRuntime) Down(_ context.Context, stack domain.Stack) error {
 	f.actions = append(f.actions, "down:"+stack.Name)
-	return f.errors[stack.Name]
+	return f.composeActionError("down", stack.Name)
 }
 func (f *fakeRuntime) Up(_ context.Context, stack domain.Stack) error {
 	f.actions = append(f.actions, "up:"+stack.Name)
-	return f.errors[stack.Name]
+	err := f.composeActionError("up", stack.Name)
+	if err == nil && len(f.upSnapshot.Containers) > 0 {
+		f.snapshot = f.upSnapshot
+	}
+	return err
 }
 func (f *fakeRuntime) StopStack(_ context.Context, stack domain.Stack) error {
 	f.actions = append(f.actions, "stop-stack:"+stack.Name)
@@ -425,15 +448,34 @@ func (f *fakeRuntime) RestartStack(_ context.Context, stack domain.Stack) error 
 }
 func (f *fakeRuntime) PullStack(_ context.Context, stack domain.Stack) error {
 	f.actions = append(f.actions, "pull-stack:"+stack.Name)
-	return f.errors[stack.Name]
+	err := f.composeActionError("pull-stack", stack.Name)
+	if err == nil && len(f.pullImages) > 0 {
+		f.images = append([]domain.Image(nil), f.pullImages...)
+	}
+	return err
 }
 func (f *fakeRuntime) PullStackServices(_ context.Context, stack domain.Stack, services []string) error {
 	f.actions = append(f.actions, "pull-stack-services:"+stack.Name+":"+strings.Join(services, ","))
-	return f.errors[stack.Name]
+	err := f.composeActionError("pull-stack-services", stack.Name)
+	if err == nil && len(f.pullImages) > 0 {
+		f.images = append([]domain.Image(nil), f.pullImages...)
+	}
+	return err
 }
 func (f *fakeRuntime) UpStackServices(_ context.Context, stack domain.Stack, services []string) error {
 	f.actions = append(f.actions, "up-stack-services:"+stack.Name+":"+strings.Join(services, ","))
-	return f.errors[stack.Name]
+	err := f.composeActionError("up-stack-services", stack.Name)
+	if err == nil && len(f.upSnapshot.Containers) > 0 {
+		f.snapshot = f.upSnapshot
+	}
+	return err
+}
+
+func (f *fakeRuntime) composeActionError(action, project string) error {
+	if err := f.actionErrors[action+":"+project]; err != nil {
+		return err
+	}
+	return f.errors[project]
 }
 func (f *fakeRuntime) ComposeLogs(context.Context, domain.Stack, int) (ports.LogStream, error) {
 	return ports.LogStream{}, f.err

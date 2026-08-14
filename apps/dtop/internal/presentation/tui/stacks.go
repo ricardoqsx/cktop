@@ -46,7 +46,19 @@ func (m Model) stacksView(layout sharedui.Layout) sharedui.View {
 		if reason := stack.DownUnavailableReason(); reason != "" {
 			down = m.localizer.Text(i18n.MessageCommonUnavailableReason, reason)
 		}
-		sections = append(sections, sharedui.Section{Title: m.localizer.Text(i18n.MessageSectionSelectedStack), Body: strings.Join([]string{m.localizer.Text(i18n.MessageStackWorkingDirectory, workingDir), m.localizer.Text(i18n.MessageStackComposeFiles, files), m.localizer.Text(i18n.MessageStackDown, down)}, "\n")})
+		lines := []string{m.localizer.Text(i18n.MessageStackWorkingDirectory, workingDir), m.localizer.Text(i18n.MessageStackComposeFiles, files), m.localizer.Text(i18n.MessageStackDown, down)}
+		if stack.UpdatePending {
+			if stack.UpdateUnknown {
+				reason := stack.UpdateReason
+				if reason == "" {
+					reason = m.localizer.Text(i18n.MessageCommonUnknown)
+				}
+				lines = append(lines, m.localizer.Text(i18n.MessageStackUpdateUnknown, reason))
+			} else {
+				lines = append(lines, m.localizer.Text(i18n.MessageStackUpdatePending))
+			}
+		}
+		sections = append(sections, sharedui.Section{Title: m.localizer.Text(i18n.MessageSectionSelectedStack), Body: strings.Join(lines, "\n")})
 	}
 	if len(m.stackDiagnostics) > 0 {
 		sections = append(sections, sharedui.Section{Title: m.localizer.Text(i18n.MessageSectionRegistrationDiagnostics), Body: strings.Join(m.stackDiagnostics, "\n")})
@@ -74,7 +86,7 @@ func renderStacksLocalized(stacks []domain.Stack, selected, selectedContainer st
 		title string
 		width int
 	}
-	stateWidth := 9
+	stateWidth := 12
 	if width >= 80 {
 		stateWidth = 20
 	}

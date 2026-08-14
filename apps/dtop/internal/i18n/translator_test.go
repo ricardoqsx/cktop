@@ -16,8 +16,8 @@ func TestSharedShellEnglishAndSpanish(t *testing.T) {
 		help     string
 		fallback string
 	}{
-		{locale: "en", status: "LOADING", footer: "tab next", help: "Help", fallback: "Overview"},
-		{locale: "es", status: "CARGANDO", footer: "tab siguiente", help: "Ayuda", fallback: "Resumen"},
+		{locale: "en", status: "LOADING", footer: "[Tab] next", help: "Help", fallback: "Overview"},
+		{locale: "es", status: "CARGANDO", footer: "[Tab] siguiente", help: "Ayuda", fallback: "Resumen"},
 	}
 
 	for _, test := range tests {
@@ -65,6 +65,25 @@ func TestSpanishConfirmationDocumentsAcceptedKeys(t *testing.T) {
 	got := New("es").Text(MessageConfirmControls)
 	if !strings.Contains(got, "[y/N]") {
 		t.Fatalf("Spanish confirmation controls = %q, want accepted y/N keys", got)
+	}
+}
+
+func TestAdvancedMessagesAreLocalizedAndShowExactCommand(t *testing.T) {
+	for locale, expected := range map[string][]string{
+		"en": {"Advanced", "Delete unused Docker data", "Command: [docker system prune --all --force]"},
+		"es": {"Avanzado", "Eliminar datos Docker sin uso", "Comando: [docker system prune --all --force]"},
+	} {
+		translator := New(locale)
+		got := []string{
+			translator.Text(MessageAdvancedTitle),
+			translator.Text(MessageAdvancedDeleteSystem),
+			translator.Text(MessageAdvancedCommand, "docker system prune --all --force"),
+		}
+		for index := range expected {
+			if got[index] != expected[index] {
+				t.Fatalf("locale %s message %d = %q, want %q", locale, index, got[index], expected[index])
+			}
+		}
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 
 type Stack struct {
 	Name            string
+	Registered      bool
 	State           string
 	Services        []StackService
 	ContainerItems  []Container
@@ -20,6 +21,10 @@ type Stack struct {
 	MemoryUsage     uint64
 	MemoryLimit     uint64
 	MemoryAvailable bool
+	Update          UpdateStatus
+	UpdatePending   bool
+	UpdateUnknown   bool
+	UpdateReason    string
 }
 
 type StackService struct {

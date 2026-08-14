@@ -256,8 +256,9 @@ func TestToDomainContainerKeepsComposeMetadataLabels(t *testing.T) {
 		"com.docker.compose.service":              "web",
 		"com.docker.compose.project.working_dir":  " /srv/app ",
 		"com.docker.compose.project.config_files": " compose.yaml ",
+		"com.docker.compose.oneoff":               "True",
 	}})
-	if container.ComposeProject != "app" || container.ComposeService != "web" || container.ComposeWorkingDir != "/srv/app" || container.ComposeConfigFiles != "compose.yaml" {
+	if container.ComposeProject != "app" || container.ComposeService != "web" || container.ComposeWorkingDir != "/srv/app" || container.ComposeConfigFiles != "compose.yaml" || !container.ComposeOneOff {
 		t.Fatalf("expected Compose labels in snapshot container, got %#v", container)
 	}
 }

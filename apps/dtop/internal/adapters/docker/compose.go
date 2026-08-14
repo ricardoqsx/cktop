@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -15,16 +17,20 @@ import (
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/ports"
 )
 
-const composeTimeout = 60 * time.Second
+const (
+	composeTimeout           = 60 * time.Second
+	composeConfigOutputLimit = 1 << 20
+)
 
 var commandContext = exec.CommandContext
+var composeClient = NewClient
 
 // compose executes a local Compose lifecycle command directly, never through a shell.
 func (r *Runtime) compose(ctx context.Context, stack domain.Stack, operation string, extra ...string) error {
 	if reason := stack.DownUnavailableReason(); reason != "" {
 		return fmt.Errorf("%s %s: %s", operation, stack.Name, reason)
 	}
-	client, info, err := NewClient(ctx, r.options)
+	client, info, err := composeClient(ctx, r.options)
 	if err != nil {
 		return err
 	}
@@ -98,11 +104,122 @@ func composeLogArgs(stack domain.Stack, tail int) []string {
 	return args
 }
 
+func composeConfigArgs(stack domain.Stack) []string {
+	return composeArgs(stack, "config", "--format", "json")
+}
+
+func (r *Runtime) ComposeConfig(ctx context.Context, stack domain.Stack) ([]ports.ComposeServiceImage, error) {
+	if reason := stack.DownUnavailableReason(); reason != "" {
+		return nil, fmt.Errorf("config %s: %s", stack.Name, reason)
+	}
+	client, info, err := composeClient(ctx, r.options)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+	if info.Remote {
+		return nil, domain.ErrRemoteUnsupported
+	}
+
+	commandCtx, cancel := context.WithTimeout(ctx, composeTimeout)
+	defer cancel()
+	path := r.command
+	if path == "" {
+		path = "docker"
+	}
+	command := commandContext(commandCtx, path, composeConfigArgs(stack)...)
+	command.Dir = stack.WorkingDir
+	stdout := boundedOutput{limit: composeConfigOutputLimit}
+	var stderr limitedOutput
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		if commandCtx.Err() != nil {
+			return nil, commandCtx.Err()
+		}
+		if stdout.exceeded {
+			return nil, fmt.Errorf("docker compose config %q: output exceeds %d bytes", stack.Name, composeConfigOutputLimit)
+		}
+		message := stderr.String()
+		if message != "" {
+			return nil, fmt.Errorf("docker compose config %q: %w: %s", stack.Name, err, message)
+		}
+		return nil, fmt.Errorf("docker compose config %q: %w", stack.Name, err)
+	}
+	if stdout.exceeded {
+		return nil, fmt.Errorf("docker compose config %q: output exceeds %d bytes", stack.Name, composeConfigOutputLimit)
+	}
+	images, err := parseComposeConfig(stdout.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("docker compose config %q: %w", stack.Name, err)
+	}
+	return images, nil
+}
+
+type composeServiceImages []ports.ComposeServiceImage
+
+func (images *composeServiceImages) UnmarshalJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		return fmt.Errorf("services must be an object")
+	}
+
+	seen := make(map[string]struct{})
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		name, ok := token.(string)
+		if !ok || strings.TrimSpace(name) == "" {
+			return fmt.Errorf("service name must not be empty")
+		}
+		if _, exists := seen[name]; exists {
+			return fmt.Errorf("duplicate service name")
+		}
+		seen[name] = struct{}{}
+
+		var service struct {
+			Image      string          `json:"image"`
+			Build      json.RawMessage `json:"build"`
+			PullPolicy string          `json:"pull_policy"`
+		}
+		if err := decoder.Decode(&service); err != nil {
+			return err
+		}
+		hasBuild := len(service.Build) > 0 && string(service.Build) != "null"
+		*images = append(*images, ports.ComposeServiceImage{Service: name, Reference: service.Image, Build: hasBuild, PullPolicy: service.PullPolicy})
+	}
+	if _, err := decoder.Token(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func parseComposeConfig(data []byte) ([]ports.ComposeServiceImage, error) {
+	config := struct {
+		Services composeServiceImages `json:"services"`
+	}{Services: make(composeServiceImages, 0)}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("invalid Docker Compose config JSON: %w", err)
+	}
+	images := []ports.ComposeServiceImage(config.Services)
+	sort.Slice(images, func(i, j int) bool {
+		return images[i].Service < images[j].Service
+	})
+	return images, nil
+}
+
 func (r *Runtime) ComposeLogs(ctx context.Context, stack domain.Stack, tail int) (ports.LogStream, error) {
 	if reason := stack.DownUnavailableReason(); reason != "" {
 		return ports.LogStream{}, fmt.Errorf("logs %s: %s", stack.Name, reason)
 	}
-	client, info, err := NewClient(ctx, r.options)
+	client, info, err := composeClient(ctx, r.options)
 	if err != nil {
 		return ports.LogStream{}, err
 	}
@@ -187,4 +304,25 @@ func (w *limitedOutput) String() string {
 		}
 		return r
 	}, w.Buffer.String()))
+}
+
+type boundedOutput struct {
+	bytes.Buffer
+	limit    int
+	exceeded bool
+}
+
+func (w *boundedOutput) Write(data []byte) (int, error) {
+	originalLength := len(data)
+	remaining := w.limit - w.Len()
+	if len(data) > remaining {
+		w.exceeded = true
+	}
+	if remaining > 0 {
+		if len(data) > remaining {
+			data = data[:remaining]
+		}
+		_, _ = w.Buffer.Write(data)
+	}
+	return originalLength, nil
 }

@@ -524,7 +524,7 @@ func (r *Runtime) loadMetrics(ctx context.Context, c *Client, containers []domai
 	var wait sync.WaitGroup
 
 	for index := range containers {
-		if containers[index].State != "running" {
+		if containers[index].State != "running" && containers[index].ComposeProject == "" {
 			continue
 		}
 		wait.Add(1)
@@ -544,9 +544,11 @@ func (r *Runtime) loadMetrics(ctx context.Context, c *Client, containers []domai
 					container.Image = configuredImage
 				}
 			}
-			stats, err := c.containerStats(ctx, container.ID)
-			if err == nil {
-				container = r.applyMetrics(container, stats, onlineCPUs)
+			if container.State == "running" {
+				stats, err := c.containerStats(ctx, container.ID)
+				if err == nil {
+					container = r.applyMetrics(container, stats, onlineCPUs)
+				}
 			}
 			containers[index] = container
 		}(index)
@@ -687,6 +689,7 @@ func toDomainContainer(summary mobycontainer.Summary) domain.Container {
 		ComposeService:     strings.TrimSpace(summary.Labels["com.docker.compose.service"]),
 		ComposeWorkingDir:  strings.TrimSpace(summary.Labels["com.docker.compose.project.working_dir"]),
 		ComposeConfigFiles: strings.TrimSpace(summary.Labels["com.docker.compose.project.config_files"]),
+		ComposeOneOff:      strings.EqualFold(strings.TrimSpace(summary.Labels["com.docker.compose.oneoff"]), "true"),
 	}
 }
 

@@ -21,7 +21,7 @@ func TestShellViewIncludesProductContent(t *testing.T) {
 	})
 
 	view := model.View()
-	for _, expected := range []string{"dtop", "Docker TUI", "Containers", "Status", "ready", "running", "q quit"} {
+	for _, expected := range []string{"dtop", "Docker TUI", "Containers", "Status", "ready", "running", "[q] quit"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("expected view to contain %q, got %q", expected, view)
 		}
@@ -32,7 +32,7 @@ func TestShellRendersFooterNoticeBeforeHelpLine(t *testing.T) {
 	model := newShell(ShellOptions{Footer: "q quit", FooterNotice: "Docker Hub: run docker login", Views: []View{{Title: "Containers"}}})
 	view := ansi.Strip(model.View())
 	notice := strings.Index(view, "Docker Hub: run docker login")
-	help := strings.Index(view, "q quit")
+	help := strings.Index(view, "[q] quit")
 	if notice < 0 || help < 0 || notice > help {
 		t.Fatalf("footer notice was not rendered before help: %q", view)
 	}
@@ -67,6 +67,100 @@ func TestDefaultLocalizerFormatsEnglishDecimalsAndPlurals(t *testing.T) {
 	}
 	if got := localizer.Plural(MessageShellViewCount, 2); got != "2 views" {
 		t.Fatalf("expected plural views, got %q", got)
+	}
+}
+
+func TestShellBracketsEnglishAndSpanishKeyboardHelp(t *testing.T) {
+	tests := []struct {
+		name      string
+		localizer Localizer
+		footer    []string
+		help      []string
+		minimal   []string
+		compact   []string
+	}{
+		{
+			name:   "English fallback",
+			footer: []string{"[Tab] next", "[Shift+Tab] prev", "[?] help", "[q] quit"},
+			help:   []string{"Help", "[Tab]", "[Shift+Tab]", "[Esc]", "[q]"},
+			minimal: []string{
+				"[Tab] next", "[q] quit",
+			},
+			compact: []string{"Help", "[Tab] next", "[Shift+Tab] prev", "[Esc] close", "[q] quit"},
+		},
+		{
+			name: "Spanish",
+			localizer: testLocalizer{messages: map[string]string{
+				MessageShellHelpTitle:        "Ayuda",
+				MessageShellHelpNextView:     "Tab        vista siguiente",
+				MessageShellHelpPreviousView: "Shift+Tab  vista anterior",
+				MessageShellHelpClose:        "Esc        cerrar ayuda",
+				MessageShellHelpQuit:         "q          salir",
+				MessageShellHelpCompact:      "Ayuda: tab siguiente | shift+tab anterior | esc cerrar | q salir",
+				MessageShellFooterDefault:    "tab siguiente  shift+tab anterior  ? ayuda  q salir",
+				MessageShellFooterMinimal:    "tab siguiente  q salir",
+			}},
+			footer: []string{"[Tab] siguiente", "[Shift+Tab] anterior", "[?] ayuda", "[q] salir"},
+			help:   []string{"Ayuda", "[Tab]", "vista siguiente", "[Shift+Tab]", "vista anterior", "[Esc]", "cerrar ayuda", "[q]", "salir"},
+			minimal: []string{
+				"[Tab] siguiente", "[q] salir",
+			},
+			compact: []string{"Ayuda", "[Tab] siguiente", "[Shift+Tab] anterior", "[Esc] cerrar", "[q] salir"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			model := newShell(ShellOptions{Localizer: test.localizer})
+			footer := ansi.Strip(model.View())
+			for _, expected := range test.footer {
+				if !strings.Contains(footer, expected) {
+					t.Fatalf("expected footer to contain %q, got %q", expected, footer)
+				}
+			}
+
+			updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+			help := ansi.Strip(updated.View())
+			for _, expected := range test.help {
+				if !strings.Contains(help, expected) {
+					t.Fatalf("expected help to contain %q, got %q", expected, help)
+				}
+			}
+
+			minimalLayout := Layout{Mode: LayoutMinimal, ContentWidth: 200}
+			minimalFooter := ansi.Strip(model.renderFooter(minimalLayout))
+			for _, expected := range test.minimal {
+				if !strings.Contains(minimalFooter, expected) {
+					t.Fatalf("expected minimal footer to contain %q, got %q", expected, minimalFooter)
+				}
+			}
+
+			model.showHelp = true
+			compactHelp := ansi.Strip(model.renderContentDense(minimalLayout))
+			for _, expected := range test.compact {
+				if !strings.Contains(compactHelp, expected) {
+					t.Fatalf("expected compact help to contain %q, got %q", expected, compactHelp)
+				}
+			}
+		})
+	}
+}
+
+func TestShellDoesNotPrefixEmptyTabTitle(t *testing.T) {
+	model := newShell(ShellOptions{Views: []View{
+		{Title: "Volumes", Status: StatusEmpty},
+		{Title: "Images", Status: StatusLoading},
+	}})
+
+	tabs := ansi.Strip(model.renderTabs(ResolveLayout(120, 30)))
+	if strings.Contains(tabs, "empty Volumes") {
+		t.Fatalf("empty tab title was prefixed: %q", tabs)
+	}
+	if !strings.Contains(tabs, "Volumes") {
+		t.Fatalf("expected empty tab title, got %q", tabs)
+	}
+	if !strings.Contains(tabs, "loading Images") {
+		t.Fatalf("expected loading tab prefix, got %q", tabs)
 	}
 }
 
@@ -168,4 +262,23 @@ func TestResolveLayoutUsesWidthAndHeight(t *testing.T) {
 	if got := ResolveLayout(100, 10).Mode; got != LayoutMinimal {
 		t.Fatalf("expected low terminal to use minimal layout, got %v", got)
 	}
+}
+
+type testLocalizer struct {
+	messages map[string]string
+}
+
+func (localizer testLocalizer) Text(id string, args ...any) string {
+	if message, ok := localizer.messages[id]; ok {
+		return formatMessage(message, args...)
+	}
+	return DefaultLocalizer().Text(id, args...)
+}
+
+func (testLocalizer) Plural(id string, count int, args ...any) string {
+	return DefaultLocalizer().Plural(id, count, args...)
+}
+
+func (testLocalizer) Decimal(value float64, precision int) string {
+	return DefaultLocalizer().Decimal(value, precision)
 }

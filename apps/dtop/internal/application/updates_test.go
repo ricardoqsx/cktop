@@ -3,6 +3,8 @@ package application
 import (
 	"context"
 	"errors"
+	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,7 +14,7 @@ import (
 
 func TestNormalizeImageReference(t *testing.T) {
 	for _, test := range []struct{ in, want string }{
-		{"nginx:1.27", "docker.io/library/nginx:1.27"}, {"linuxserver/jellyfin:10", "docker.io/linuxserver/jellyfin:10"}, {"ghcr.io/acme/app:2", "ghcr.io/acme/app:2"}, {"registry:5000/acme/app:2", "registry:5000/acme/app:2"}, {"redis@sha256:ABC", "docker.io/library/redis@sha256:abc"},
+		{"nginx", "docker.io/library/nginx:latest"}, {"nginx:1.27", "docker.io/library/nginx:1.27"}, {"linuxserver/jellyfin:10", "docker.io/linuxserver/jellyfin:10"}, {"ghcr.io/acme/app:2", "ghcr.io/acme/app:2"}, {"registry:5000/acme/app:2", "registry:5000/acme/app:2"}, {"redis@sha256:ABC", "docker.io/library/redis@sha256:abc"},
 	} {
 		if got, ok := NormalizeImageReference(test.in); !ok || got != test.want {
 			t.Fatalf("%q: got %q ok=%v", test.in, got, ok)
@@ -162,5 +164,75 @@ func TestScanClassifiesDockerHubRateLimitAsLoginRequired(t *testing.T) {
 	results := service.Scan(context.Background(), snapshot, images)
 	if len(results) != 1 || results[0].Reason != DockerHubLoginRequiredReason {
 		t.Fatalf("rate-limit result: %#v", results)
+	}
+}
+
+func TestManifestLookupUsesExactBuildxFallbackArguments(t *testing.T) {
+	var mu sync.Mutex
+	var calls [][]string
+	service := NewImageUpdateService(CommandExecutor(func(_ context.Context, name string, args ...string) ([]byte, error) {
+		mu.Lock()
+		calls = append(calls, append([]string{name}, args...))
+		mu.Unlock()
+		if len(args) > 0 && args[0] == "buildx" {
+			return nil, errors.New("buildx unavailable")
+		}
+		return []byte(`{"Descriptor":{"digest":"sha256:remote"}}`), nil
+	}), UpdateOptions{Enabled: true, Interval: time.Minute, Concurrency: 1})
+	images := []domain.Image{{ID: "sha256:image", RepoDigests: []string{"docker.io/library/app@sha256:local"}}}
+	snapshot := domain.Snapshot{Containers: []domain.Container{{ID: "app", State: "running", Image: "app:latest", ImageID: "sha256:image"}}}
+
+	results := service.Scan(context.Background(), snapshot, images)
+	if len(results) != 1 || results[0].Status != domain.UpdateAvailable {
+		t.Fatalf("fallback result = %#v", results)
+	}
+	want := [][]string{
+		{"docker", "buildx", "imagetools", "inspect", "docker.io/library/app:latest", "--format", "{{json .Manifest}}"},
+		{"docker", "manifest", "inspect", "--verbose", "docker.io/library/app:latest"},
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("manifest calls = %#v, want %#v", calls, want)
+	}
+}
+
+func TestCanceledManifestLookupIsNotCached(t *testing.T) {
+	var calls atomic.Int32
+	started := make(chan struct{})
+	service := NewImageUpdateService(CommandExecutor(func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return []byte(`{"Descriptor":{"digest":"sha256:remote"}}`), nil
+	}), UpdateOptions{Enabled: true, Interval: time.Minute, Concurrency: 1})
+	images := []domain.Image{{ID: "sha256:image", RepoDigests: []string{"docker.io/library/app@sha256:local"}}}
+	snapshot := domain.Snapshot{Containers: []domain.Container{{ID: "app", State: "running", Image: "app:latest", ImageID: "sha256:image"}}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		service.Scan(ctx, snapshot, images)
+		close(done)
+	}()
+	<-started
+	cancel()
+	<-done
+	results := service.Scan(context.Background(), snapshot, images)
+	if len(results) != 1 || results[0].Status != domain.UpdateAvailable || calls.Load() != 2 {
+		t.Fatalf("canceled lookup was cached: results=%#v calls=%d", results, calls.Load())
+	}
+}
+
+func TestScanIgnoresComposeOneOffContainers(t *testing.T) {
+	var calls atomic.Int32
+	service := NewImageUpdateService(CommandExecutor(func(context.Context, string, ...string) ([]byte, error) {
+		calls.Add(1)
+		return []byte(`{"Descriptor":{"digest":"sha256:remote"}}`), nil
+	}), UpdateOptions{Enabled: true, Interval: time.Minute, Concurrency: 1})
+	images := []domain.Image{{ID: "sha256:image", RepoDigests: []string{"docker.io/library/app@sha256:local"}}}
+	snapshot := domain.Snapshot{Containers: []domain.Container{{ID: "run", State: "running", Image: "app:latest", ImageID: "sha256:image", ComposeProject: "app", ComposeService: "web", ComposeOneOff: true}}}
+	if results := service.Scan(context.Background(), snapshot, images); len(results) != 0 || calls.Load() != 0 {
+		t.Fatalf("one-off scan results=%#v calls=%d", results, calls.Load())
 	}
 }

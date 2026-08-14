@@ -15,6 +15,8 @@ El workspace y la base TUI inicial están preparados. `dtop` detecta un Docker E
 
 En Stacks, el panel del proyecto seleccionado permanece debajo de la tabla con directorio, archivos Compose y disponibilidad de acciones. `l` en el padre sigue los últimos 100 logs Compose; `l` en un hijo abre sus logs de contenedor. `s` en un hijo enfocado abre una shell local real mediante `docker exec -it <container-id> /bin/sh -l`; volver con `Ctrl+D` o `exit`. Durante esa shell, el terminal pertenece al proceso y `Esc` no vuelve a dtop. `Esc` cancela ambos streams de logs y vuelve a Stacks. `e` limita la selección múltiple de Restart/Stop a los hijos. Containers se actualiza cada dos segundos; Images, Networks y Volumes se reconcilian en segundo plano cada cinco segundos. Si falla una fuente individual, su pestaña conserva los últimos datos conocidos y los marca como parciales.
 
+Desde cualquier vista principal, `[x]` abre Advanced para limpiar contenedores detenidos, imagenes, redes, volumenes o datos Docker sin uso. La opcion enfocada muestra el comando exacto y exige escribir `prune` antes de ejecutarlo. Estas operaciones solo se admiten sobre el Engine local. `docker system prune --all --force` no incluye volumenes; su limpieza permanece separada mediante `docker volume prune --force`. Al terminar, dtop conserva la salida o el error y recarga Containers, Images, Networks y Volumes.
+
 La próxima ampliación de Stacks conservará bind mounts observados en un archivo de estado separado de `dtop.conf`, para que sigan visibles después de `docker compose down`. Todavía no está implementada.
 
 ## Desarrollo local
@@ -51,6 +53,7 @@ Controles iniciales de `dtop`:
 ```text
 left/right      switch Containers, Stacks, Images, Networks and Volumes
 up/down or j/k  select the current resource
+x               open the global Advanced cleanup menu
 o               cycle State, CPU, Memory and Name sorting
 r               refresh the active resource list
 enter           open contextual actions for Containers and Images, details for Networks/Volumes, or expand a Stack
@@ -81,6 +84,16 @@ Las pruebas de adaptador que requieren un Docker Engine local son opt-in y no re
 DTOP_INTEGRATION=1 go test ./apps/dtop/internal/adapters/docker -run 'TestRuntime(NetworkAndVolume|Images|Snapshot|Stacks)Integration'
 ```
 
+La integracion D4 mutativa solo debe ejecutarse contra un Engine desechable y exige confirmar su ID explícitamente:
+
+```bash
+DTOP_MUTATION_INTEGRATION=1 \
+DTOP_MUTATION_ENGINE_ID="$(docker info --format '{{.ID}}')" \
+go test ./apps/dtop/internal/application -run TestComposeUpdatePersistenceMutationIntegration -count=1
+```
+
+Esta prueba levanta un proyecto temporal haciendo que `alpine:3.20` use inicialmente el image ID de `3.19`, ejecuta el ciclo D4 contra el `3.20` remoto real y restaura cualquier tag local previo durante el cleanup.
+
 Los binarios generados por `go build` quedan en la raíz si no se indica una ruta de salida. Son artefactos locales y no deben versionarse.
 
 ## Configuración de dtop
@@ -103,7 +116,7 @@ concurrency = 4
 Valores disponibles: `usage`, `percent` y `both`.
 `accent_color` y `focus_color` aceptan valores ANSI/256 de `0` a `255`; sus defaults son `63` y `15`. El acento es el fondo del foco en tablas y menús, mientras `focus_color` define el texto resaltado.
 
-La detección de actualizaciones consulta cada referencia única usada por contenedores `running` mediante Docker CLI, reutilizando sus credenciales y credential helpers. Prefiere `docker buildx imagetools inspect` para obtener el digest del índice y usa `docker manifest inspect --verbose` como fallback verificable. Compara el digest remoto con los `RepoDigests` locales; `U` indica una actualización, `R` una imagen descargada pendiente de aplicar, `=` actual, `P` una referencia fijada por digest, `?` una comparación no verificable y `...` una consulta activa. No filtra `latest`: una etiqueta versionada también se consulta. Images conserva la vista de referencia, mientras Containers muestra una marca compacta `U` o `R` junto al nombre y expone `Pull update`, `Update now` o `Apply downloaded update` desde su menú contextual. La selección múltiple procesa únicamente destinos elegibles y muestra cuántos se omiten. Para contenedores directos, `Update now` hace pull y recrea conservando la configuración inspeccionada; los contenedores `AutoRemove` se rechazan porque no pueden restaurarse con seguridad. En Compose, una acción iniciada desde hijos se deduplica por Stack y servicio; una selección de padres opera el Stack completo. Ambas rutas requieren metadata válida y ejecutan `docker compose pull` seguido de `up -d`; la ruta por servicio añade `--no-deps` para respetar el alcance confirmado. Pull no reinicia ni recrea contenedores. Si Docker Hub no tiene una credencial configurada, Help muestra el recordatorio persistente `docker login` hasta detectarla.
+La detección de actualizaciones consulta cada referencia única usada por contenedores `running` mediante Docker CLI, reutilizando sus credenciales y credential helpers. Prefiere `docker buildx imagetools inspect` para obtener el digest del índice y usa `docker manifest inspect --verbose` como fallback verificable. Compara el digest remoto con los `RepoDigests` locales; `U` indica una actualización, `R` una imagen descargada pendiente de aplicar, `=` actual, `P` una referencia fijada por digest, `?` una comparación no verificable y `...` una consulta activa. No filtra `latest`: una etiqueta versionada también se consulta. Images conserva la vista de referencia, mientras Containers muestra una marca compacta `U` o `R` junto al nombre y expone `Pull update`, `Update now` o `Apply downloaded update` desde su menú contextual. La selección múltiple procesa únicamente destinos elegibles y muestra cuántos se omiten. Para contenedores directos, `Update now` hace pull y recrea conservando la configuración inspeccionada; los contenedores `AutoRemove` se rechazan porque no pueden restaurarse con seguridad. En Compose registrado, dtop correlaciona cada servicio con `docker compose config`, escribe un marcador durable antes del pull y persiste los digests descargado/aplicado en `$XDG_STATE_HOME/dtop/compose-updates.json`. Una acción iniciada desde hijos se deduplica por Stack y servicio; una selección de padres opera los servicios elegibles del Stack. `Up` queda bloqueado mientras exista una descarga pendiente y la TUI ofrece `Apply downloaded update`; `system down` no borra esa evidencia. Pull no reinicia ni recrea contenedores. Si Docker Hub no tiene una credencial configurada, Help muestra el recordatorio persistente `docker login` hasta detectarla.
 
 Para registrar opcionalmente un proyecto Compose local:
 
@@ -113,7 +126,7 @@ working_dir = /srv/docker/nextcloud
 files = compose.yaml, compose.prod.yaml
 ```
 
-El nombre, `working_dir` y `files` son obligatorios y no pueden estar vacíos. `working_dir` debe existir y ser un directorio. Cada entrada de `files` se separa por coma; las rutas relativas se resuelven contra `working_dir`, y las absolutas se conservan. dtop solo comprueba que las rutas existan y no lee su contenido. Una inscripción válida prevalece sobre los metadatos detectados por labels. Una inscripción válida sin contenedores se muestra como `Down`; no se infiere `Never deployed`. Un archivo ausente se muestra como `Missing compose file`. Inscripciones malformadas no crean stacks y aparecen como diagnósticos controlados en Stacks. En Stacks, `e`, espacio y Enter permiten seleccionar proyectos. Down/Missing con metadatos válidos expone Up; Running/Mixed expone Stop, Restart y Down; Stopped expone Up, Restart y Down. Cada acción pide `Are you sure? [y/N]`. dtop invoca localmente `docker compose` con el nombre, directorio y cada archivo explícitos; nunca añade `--volumes`.
+El nombre, `working_dir` y `files` son obligatorios y no pueden estar vacíos. `working_dir` debe existir y ser un directorio. Cada entrada de `files` se separa por coma; las rutas relativas se resuelven contra `working_dir`, y las absolutas se conservan. dtop solo comprueba que las rutas existan y no lee su contenido. Una inscripción válida prevalece sobre los metadatos detectados por labels. Una inscripción válida sin contenedores se muestra como `Down`; no se infiere `Never deployed`. Un archivo ausente se muestra como `Missing compose file`. Inscripciones malformadas no crean stacks y aparecen como diagnósticos controlados en Stacks. En Stacks, `e`, espacio y Enter permiten seleccionar proyectos. Down con metadatos válidos expone Up, salvo que exista una actualización descargada pendiente, en cuyo caso expone Apply; Running/Mixed expone Stop, Restart y Down; Stopped aplica la misma protección antes de Up. Cada mutación pide `Are you sure? [y/N]`. dtop invoca localmente `docker compose` con el nombre, directorio y cada archivo explícitos; nunca añade `--volumes`.
 
 Configuración global:
 

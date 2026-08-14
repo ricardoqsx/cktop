@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/adapters/docker"
+	stateadapter "github.com/ricardoqsx/cktop/apps/dtop/internal/adapters/state"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/application"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/config"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/i18n"
@@ -22,11 +23,15 @@ func main() {
 	}
 
 	runtime := docker.NewRuntime(docker.ResolverOptions{})
+	composeUpdates, stateErr := stateadapter.NewComposeUpdates(stateadapter.DefaultComposeUpdatesPath())
+	if stateErr != nil {
+		settings.ComposeDiagnostics = append(settings.ComposeDiagnostics, fmt.Sprintf("Compose update state unavailable: %v", stateErr))
+	}
 	projects := make([]application.ComposeProject, len(settings.ComposeProjects))
 	for index, project := range settings.ComposeProjects {
 		projects[index] = application.ComposeProject{Name: project.Name, WorkingDir: project.WorkingDir, Files: project.Files, MissingFiles: project.MissingFiles}
 	}
-	service := application.NewContainerService(runtime, projects...)
+	service := application.NewContainerServiceWithComposeUpdates(runtime, composeUpdates, projects...)
 	updates := application.NewImageUpdateService(application.CommandExecutor(func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return exec.CommandContext(ctx, name, args...).CombinedOutput()
 	}), application.UpdateOptions{Enabled: settings.Updates.Enabled, Interval: settings.Updates.Interval, Concurrency: settings.Updates.Concurrency})

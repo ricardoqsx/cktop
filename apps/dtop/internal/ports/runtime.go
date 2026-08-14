@@ -23,6 +23,20 @@ type ResourceLoad struct {
 	VolumesErr  error
 }
 
+type ComposeServiceImage struct {
+	Service    string
+	Reference  string
+	Build      bool
+	PullPolicy string
+}
+
+type ComposeUpdateStore interface {
+	Get(project string) (domain.ComposeUpdateProject, bool)
+	Put(project domain.ComposeUpdateProject) error
+	Health() error
+	BeginMutation() (func(), error)
+}
+
 type Runtime interface {
 	Snapshot(ctx context.Context) (domain.Snapshot, error)
 	LoadResources(ctx context.Context) (ResourceLoad, error)
@@ -51,4 +65,6 @@ type Runtime interface {
 	UpStackServices(ctx context.Context, stack domain.Stack, services []string) error
 	Down(ctx context.Context, stack domain.Stack) error
 	ComposeLogs(ctx context.Context, stack domain.Stack, tail int) (LogStream, error)
+	ComposeConfig(ctx context.Context, stack domain.Stack) ([]ComposeServiceImage, error)
+	Prune(ctx context.Context, args ...string) (string, error)
 }

@@ -100,7 +100,7 @@ func containerColumnsLocalized(width int, memoryMode config.MemoryMode, editing 
 		{id: "marker", title: "", width: markerWidth},
 		{id: "update", title: "", width: 1},
 		{id: "name", title: localizer.Text(i18n.MessageColumnName), width: 10, value: func(container domain.Container) string { return container.Name }},
-		{id: "state", title: localizer.Text(i18n.MessageColumnState), width: 9, value: func(container domain.Container) string { return localizeState(localizer, container.State) }},
+		{id: "state", title: localizer.Text(i18n.MessageColumnState), width: 12, value: func(container domain.Container) string { return localizeState(localizer, container.State) }},
 	}
 
 	if width >= 50 {

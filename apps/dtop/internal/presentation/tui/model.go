@@ -117,6 +117,7 @@ type Model struct {
 	logTitle                 string
 	shellActive              bool
 	shellErr                 error
+	advanced                 advancedState
 	keys                     keyMap
 	now                      func() time.Time
 	ctx                      context.Context
@@ -140,6 +141,24 @@ type keyMap struct {
 	details   key.Binding
 	logs      key.Binding
 	shell     key.Binding
+	advanced  key.Binding
+}
+
+type advancedStage int
+
+const (
+	advancedClosed advancedStage = iota
+	advancedMenu
+	advancedConfirm
+	advancedRunning
+	advancedResult
+)
+
+type advancedState struct {
+	stage  advancedStage
+	index  int
+	input  string
+	result application.PruneResult
 }
 
 type panelMode int
@@ -171,16 +190,18 @@ const (
 )
 
 type actionTarget struct {
-	ID          string
-	Name        string
-	State       string
-	ImageID     string
-	Update      domain.UpdateStatus
-	Unavailable string
-	PullRefs    []string
-	Recreate    []application.RecreateTarget
-	Stack       *domain.Stack
-	Service     string
+	ID            string
+	Name          string
+	State         string
+	ImageID       string
+	Update        domain.UpdateStatus
+	UpdatePending bool
+	UpdateUnknown bool
+	Unavailable   string
+	PullRefs      []string
+	Recreate      []application.RecreateTarget
+	Stack         *domain.Stack
+	Service       string
 }
 
 type actionState struct {
@@ -299,6 +320,7 @@ type imageUpdatesLoadedMsg struct {
 }
 type imageUpdateRefreshMsg struct{ generation uint64 }
 type dockerHubLoginLoadedMsg struct{ configured bool }
+type advancedFinishedMsg struct{ result application.PruneResult }
 
 const (
 	refreshInterval         = 2 * time.Second
@@ -371,6 +393,7 @@ func newModel(service application.ContainerService, display config.Display, upda
 			details:   key.NewBinding(key.WithKeys("d"), key.WithHelp("d", localizer.Text(i18n.MessageKeyDetails))),
 			logs:      key.NewBinding(key.WithKeys("l"), key.WithHelp("l", localizer.Text(i18n.MessageKeyLogs))),
 			shell:     key.NewBinding(key.WithKeys("s"), key.WithHelp("s", localizer.Text(i18n.MessageKeyShell))),
+			advanced:  key.NewBinding(key.WithKeys("x"), key.WithHelp("x", localizer.Text(i18n.MessageKeyAdvanced))),
 		},
 		now:    time.Now,
 		ctx:    ctx,
@@ -397,11 +420,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.action.running {
 			return m, nil
 		}
+		if m.advanced.stage != advancedClosed {
+			return m.updateAdvanced(msg)
+		}
 		if m.action.stage == actionConfirm {
 			return m.updateConfirmation(msg)
 		}
 		if m.action.stage == actionMenu {
 			return m.updateActionMenu(msg)
+		}
+		if key.Matches(msg, m.keys.advanced) && m.canOpenAdvanced() {
+			m.advanced = advancedState{stage: advancedMenu}
+			return m, nil
 		}
 		if m.panel == panelLogs {
 			return m.updateLogs(msg)
@@ -526,6 +556,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.snapshot = m.service.Sort(msg.snapshot, m.sortMode)
 			m.prunePendingRecreates()
 			m.applyContainerUpdateStatuses()
+			m.snapshot = m.service.DecorateComposeSnapshot(m.snapshot)
 			m.stacks = m.service.RebuildStacks(m.snapshot)
 			m.stacksLoading, m.stacksLoaded, m.stacksErr = false, true, nil
 			m.syncStackSelection()
@@ -686,6 +717,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updatesChecking = make(map[string]domain.UpdateStatus)
 		m.applyPendingImageStatuses()
 		m.applyContainerUpdateStatuses()
+		m.snapshot = m.service.DecorateComposeSnapshot(m.snapshot)
 		m.stacks = m.service.RebuildStacks(m.snapshot)
 		return m, scheduleImageUpdateRefresh(msg.generation, m.updates.Interval())
 	case imageUpdateRefreshMsg:
@@ -721,6 +753,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.imagesErr = msg.err
 		m.applyPendingImageStatuses()
 		m.applyContainerUpdateStatuses()
+		m.snapshot = m.service.DecorateComposeSnapshot(m.snapshot)
 		m.stacks = m.service.RebuildStacks(m.snapshot)
 		m.syncImageSelection()
 		return m, m.startImageUpdateScan()
@@ -811,6 +844,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.shellActive = false
 		m.shellErr = msg.err
 		return m, nil
+	case advancedFinishedMsg:
+		m.advanced.stage = advancedResult
+		m.advanced.result = msg.result
+		m.advanced.input = ""
+		m.generation++
+		m.refreshing = true
+		m.resourcesGen++
+		m.resourcesLoading = true
+		m.imagesGen++
+		m.networksGen++
+		m.volumesGen++
+		return m, tea.Batch(
+			m.load(m.generation),
+			m.loadResources(m.resourcesGen, m.imagesGen, m.networksGen, m.volumesGen),
+		)
 	}
 
 	return m, nil
@@ -818,6 +866,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() string {
 	layout := sharedui.ResolveLayout(m.width, m.height)
+	views := []sharedui.View{
+		m.containersView(layout),
+		m.stacksView(layout),
+		m.imagesView(layout),
+		m.networksView(layout),
+		m.volumesView(layout),
+	}
+	if m.advanced.stage != advancedClosed && m.active >= 0 && m.active < len(views) {
+		views[m.active] = m.advancedView(views[m.active].Title, layout)
+	}
 	shell := sharedui.NewShell(sharedui.ShellOptions{
 		Title:        "dtop",
 		Localizer:    m.localizer,
@@ -828,13 +886,7 @@ func (m Model) View() string {
 		AccentColor:  m.accentColor,
 		Banner:       m.confirmationBanner(),
 		BannerColor:  "33",
-		Views: []sharedui.View{
-			m.containersView(layout),
-			m.stacksView(layout),
-			m.imagesView(layout),
-			m.networksView(layout),
-			m.volumesView(layout),
-		},
+		Views:        views,
 	})
 
 	if m.width > 0 || m.height > 0 {
@@ -1756,7 +1808,7 @@ func (m Model) selectedStackTargets() []actionTarget {
 	for _, stack := range m.stacks {
 		if _, selected := m.selectedStacks[stack.Name]; selected {
 			stackCopy := stack
-			targets = append(targets, actionTarget{ID: stack.Name, Name: stack.Name, State: stack.State, Update: stackUpdateStatus(stack), Unavailable: stack.DownUnavailableReason(), Stack: &stackCopy})
+			targets = append(targets, actionTarget{ID: stack.Name, Name: stack.Name, State: stack.State, Update: stackUpdateStatus(stack), UpdatePending: stack.UpdatePending, UpdateUnknown: stack.UpdateUnknown, Unavailable: stack.DownUnavailableReason(), Stack: &stackCopy})
 		}
 	}
 	return targets
@@ -2146,6 +2198,162 @@ func (m Model) updateLogs(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) canOpenAdvanced() bool {
+	return m.action.stage == actionNone && !m.action.running && m.panel == panelContainers &&
+		!m.showHelp && !m.editing && !m.stackEditing && !m.stackContainerEditing &&
+		!m.imageEditing && !m.networkEditing && !m.volumeEditing &&
+		!m.imageDetailOpen && !m.networkDetailOpen && !m.volumeDetailOpen && !m.shellActive
+}
+
+func (m Model) updateAdvanced(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.advanced.stage {
+	case advancedMenu:
+		switch {
+		case key.Matches(msg, m.keys.back), key.Matches(msg, m.keys.advanced):
+			m.advanced = advancedState{}
+		case key.Matches(msg, m.keys.up):
+			if m.advanced.index > 0 {
+				m.advanced.index--
+			}
+		case key.Matches(msg, m.keys.down):
+			if m.advanced.index < len(advancedPruneChoices())-1 {
+				m.advanced.index++
+			}
+		case key.Matches(msg, m.keys.confirm):
+			if _, ok := m.selectedPruneKind(); !ok {
+				m.advanced = advancedState{}
+			} else {
+				m.advanced.stage = advancedConfirm
+				m.advanced.input = ""
+			}
+		}
+	case advancedConfirm:
+		if key.Matches(msg, m.keys.back) {
+			m.advanced.stage = advancedMenu
+			m.advanced.input = ""
+			return m, nil
+		}
+		if msg.Type == tea.KeyBackspace || msg.Type == tea.KeyDelete {
+			input := []rune(m.advanced.input)
+			if len(input) > 0 {
+				m.advanced.input = string(input[:len(input)-1])
+			}
+			return m, nil
+		}
+		if key.Matches(msg, m.keys.confirm) {
+			if m.advanced.input == "prune" {
+				kind, _ := m.selectedPruneKind()
+				m.advanced.stage = advancedRunning
+				return m, m.runPrune(kind)
+			}
+			return m, nil
+		}
+		if msg.Type == tea.KeyRunes {
+			for _, value := range msg.Runes {
+				if value >= ' ' && value != '\x7f' && len([]rune(m.advanced.input)) < 32 {
+					m.advanced.input += string(value)
+				}
+			}
+		}
+	case advancedResult:
+		if key.Matches(msg, m.keys.back) || key.Matches(msg, m.keys.confirm) || key.Matches(msg, m.keys.advanced) {
+			m.advanced = advancedState{}
+		}
+	}
+	return m, nil
+}
+
+type advancedPruneChoice struct {
+	kind    application.PruneKind
+	message string
+}
+
+func advancedPruneChoices() []advancedPruneChoice {
+	return []advancedPruneChoice{
+		{kind: application.PruneContainers, message: i18n.MessageAdvancedDeleteContainers},
+		{kind: application.PruneImages, message: i18n.MessageAdvancedDeleteImages},
+		{kind: application.PruneNetworks, message: i18n.MessageAdvancedDeleteNetworks},
+		{kind: application.PruneVolumes, message: i18n.MessageAdvancedDeleteVolumes},
+		{kind: application.PruneSystem, message: i18n.MessageAdvancedDeleteSystem},
+		{message: i18n.MessageActionCancel},
+	}
+}
+
+func (m Model) selectedPruneKind() (application.PruneKind, bool) {
+	choices := advancedPruneChoices()
+	if m.advanced.index < 0 || m.advanced.index >= len(choices) || choices[m.advanced.index].kind == "" {
+		return "", false
+	}
+	return choices[m.advanced.index].kind, true
+}
+
+func (m Model) runPrune(kind application.PruneKind) tea.Cmd {
+	return func() tea.Msg {
+		return advancedFinishedMsg{result: m.service.Prune(m.ctx, kind)}
+	}
+}
+
+func (m Model) advancedView(title string, layout sharedui.Layout) sharedui.View {
+	if m.advanced.stage == advancedRunning {
+		return sharedui.View{Title: title, Status: sharedui.StatusLoading, Summary: m.localizer.Text(i18n.MessageAdvancedRunning), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageAdvancedCommandTitle), Body: m.advancedCommandLine()}}}
+	}
+	if m.advanced.stage == advancedResult {
+		body := m.advanced.result.Output
+		status := sharedui.StatusReady
+		if m.advanced.result.Err != nil {
+			status = sharedui.StatusError
+			if body != "" {
+				body = m.advanced.result.Err.Error() + "\n\n" + body
+			} else {
+				body = m.advanced.result.Err.Error()
+			}
+		}
+		if body == "" {
+			body = m.localizer.Text(i18n.MessageAdvancedCompleted)
+		}
+		return sharedui.View{Title: title, Status: status, HideStatus: status == sharedui.StatusReady, Sections: []sharedui.Section{
+			{Title: m.localizer.Text(i18n.MessageAdvancedResultTitle), Body: body},
+			{Title: m.localizer.Text(i18n.MessageAdvancedCommandTitle), Body: m.advancedResultCommandLine()},
+			{Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageAdvancedResultControls)},
+		}}
+	}
+
+	choices := advancedPruneChoices()
+	lines := make([]string, 0, len(choices))
+	width := layout.ContentWidth
+	if width < 20 {
+		width = 20
+	}
+	for index, choice := range choices {
+		label := m.localizer.Text(choice.message)
+		line := "  " + label
+		if index == m.advanced.index {
+			line = focusedMenuRow("> "+label, width, m.focusColor, m.accentColor)
+		}
+		lines = append(lines, line)
+	}
+	return sharedui.View{Title: title, Status: sharedui.StatusWarning, HideStatus: true, Sections: []sharedui.Section{
+		{Title: m.localizer.Text(i18n.MessageAdvancedTitle), Body: strings.Join(lines, "\n")},
+		{Title: m.localizer.Text(i18n.MessageAdvancedCommandTitle), Body: m.advancedCommandLine()},
+		{Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageAdvancedControls)},
+	}}
+}
+
+func (m Model) advancedCommandLine() string {
+	kind, ok := m.selectedPruneKind()
+	if !ok {
+		return m.localizer.Text(i18n.MessageAdvancedNoCommand)
+	}
+	return m.localizer.Text(i18n.MessageAdvancedCommand, application.PruneCommandText(kind))
+}
+
+func (m Model) advancedResultCommandLine() string {
+	if len(m.advanced.result.Command) == 0 {
+		return m.localizer.Text(i18n.MessageAdvancedNoCommand)
+	}
+	return m.localizer.Text(i18n.MessageAdvancedCommand, strings.Join(m.advanced.result.Command, " "))
+}
+
 func scheduleRefresh() tea.Cmd {
 	return tea.Tick(refreshInterval, func(now time.Time) tea.Msg {
 		return refreshMsg(now)
@@ -2319,14 +2527,23 @@ func isContainerUpdateAction(action application.Action) bool {
 }
 
 func targetUpdateEligible(action application.Action, target actionTarget) bool {
+	if target.Unavailable != "" {
+		return false
+	}
 	if target.Stack != nil && target.Stack.DownUnavailableReason() != "" {
+		return false
+	}
+	if target.Stack != nil && !target.Stack.Registered {
 		return false
 	}
 	switch action {
 	case application.ActionPull, application.ActionUpdate:
-		return target.Update == domain.UpdateAvailable && (target.Stack != nil || len(target.Recreate) > 0)
+		return (target.Update == domain.UpdateAvailable || target.Stack != nil && (target.UpdatePending && target.UpdateUnknown || target.Update == domain.UpdatePulledPendingRecreate && !target.UpdatePending)) && (target.Stack != nil || len(target.Recreate) > 0)
 	case application.ActionApply:
-		return target.Update == domain.UpdatePulledPendingRecreate && (target.Stack != nil || len(target.Recreate) > 0)
+		if target.Stack != nil {
+			return target.Update == domain.UpdatePulledPendingRecreate && target.UpdatePending
+		}
+		return target.Update == domain.UpdatePulledPendingRecreate && len(target.Recreate) > 0
 	default:
 		return false
 	}
@@ -2335,15 +2552,6 @@ func targetUpdateEligible(action application.Action, target actionTarget) bool {
 func (m Model) anyEligibleTarget(action application.Action) bool {
 	for _, target := range m.action.targets {
 		if targetUpdateEligible(action, target) {
-			return true
-		}
-	}
-	return false
-}
-
-func anyTargetStatus(targets []actionTarget, status domain.UpdateStatus) bool {
-	for _, target := range targets {
-		if target.Update == status && target.Stack != nil && target.Stack.DownUnavailableReason() == "" {
 			return true
 		}
 	}
@@ -2417,6 +2625,14 @@ func (m Model) containerActionTarget(container domain.Container) actionTarget {
 			}
 		}
 		target.Service = container.ComposeService
+		if container.ComposeOneOff {
+			target.Unavailable = "Compose one-off containers cannot update the managed service"
+		}
+		target.UpdatePending = container.UpdatePending
+		target.UpdateUnknown = container.UpdateUnknown
+		if container.Update == domain.UpdateAvailable || container.Update == domain.UpdatePulledPendingRecreate || target.UpdatePending && target.UpdateUnknown {
+			target.PullRefs = []string{container.Image}
+		}
 		return target
 	}
 	if container.Update == domain.UpdateAvailable {
@@ -2456,12 +2672,15 @@ func (m Model) runComposeContainerUpdate(ctx context.Context, action application
 		}
 		update := byStack[target.Stack.Name]
 		if update == nil {
-			update = &application.StackUpdateTarget{Stack: *target.Stack}
+			update = &application.StackUpdateTarget{Stack: *target.Stack, References: make(map[string]string)}
 			byStack[target.Stack.Name] = update
 			services[target.Stack.Name] = make(map[string]struct{})
 		}
 		if target.Service != "" {
 			services[target.Stack.Name][target.Service] = struct{}{}
+			if len(target.PullRefs) > 0 {
+				update.References[target.Service] = target.PullRefs[0]
+			}
 		}
 	}
 	updates := make([]application.StackUpdateTarget, 0, len(byStack))
@@ -2546,10 +2765,13 @@ func stackActionChoices(targets []actionTarget) []application.Action {
 		return []application.Action{"cancel"}
 	}
 	choices := []application.Action{}
-	if anyTargetStatus(targets, domain.UpdateAvailable) {
-		choices = append(choices, application.ActionPull, application.ActionUpdate)
+	if anyUpdateTargetEligible(targets, application.ActionPull) {
+		choices = append(choices, application.ActionPull)
 	}
-	if anyTargetStatus(targets, domain.UpdatePulledPendingRecreate) {
+	if anyUpdateTargetEligible(targets, application.ActionUpdate) {
+		choices = append(choices, application.ActionUpdate)
+	}
+	if anyUpdateTargetEligible(targets, application.ActionApply) {
 		choices = append(choices, application.ActionApply)
 	}
 	available := func() bool {
@@ -2571,15 +2793,38 @@ func stackActionChoices(targets []actionTarget) []application.Action {
 	}
 	switch state {
 	case "down", "missing compose file":
-		choices = append(choices, application.ActionUp)
+		if !anyPendingComposeTarget(targets) {
+			choices = append(choices, application.ActionUp)
+		}
 	case "running", "mixed":
 		choices = append(choices, application.ActionStop, application.ActionRestart, application.ActionDown)
 	case "stopped":
-		choices = append(choices, application.ActionUp, application.ActionRestart, application.ActionDown)
+		if !anyPendingComposeTarget(targets) {
+			choices = append(choices, application.ActionUp)
+		}
+		choices = append(choices, application.ActionRestart, application.ActionDown)
 	default:
 		return []application.Action{"cancel"}
 	}
 	return append(choices, "cancel")
+}
+
+func anyUpdateTargetEligible(targets []actionTarget, action application.Action) bool {
+	for _, target := range targets {
+		if targetUpdateEligible(action, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func anyPendingComposeTarget(targets []actionTarget) bool {
+	for _, target := range targets {
+		if target.UpdatePending {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) actionChoices() []application.Action {
@@ -2715,6 +2960,18 @@ func (m Model) targetNames(targets []actionTarget) []string {
 }
 
 func (m Model) confirmationBanner() string {
+	if m.advanced.stage == advancedConfirm {
+		kind, ok := m.selectedPruneKind()
+		if !ok {
+			return ""
+		}
+		return strings.Join([]string{
+			m.localizer.Text(i18n.MessageAdvancedConfirmTitle),
+			m.localizer.Text(i18n.MessageAdvancedCommand, application.PruneCommandText(kind)),
+			m.localizer.Text(i18n.MessageAdvancedConfirmInput, m.advanced.input),
+			m.localizer.Text(i18n.MessageAdvancedConfirmControls),
+		}, "\n")
+	}
 	if m.action.stage != actionConfirm {
 		return ""
 	}
@@ -2792,6 +3049,15 @@ func (m *Model) showActionResult(results []application.ActionResult) {
 		m.notice = m.localizer.Plural(i18n.MessageResultCompleted, succeeded)
 	} else {
 		m.notice = m.localizer.Text(i18n.MessageResultPartial, succeeded, len(results)-succeeded)
+	}
+	warnings := make([]string, 0)
+	for _, result := range results {
+		if result.Warning != nil {
+			warnings = append(warnings, result.Warning.Error())
+		}
+	}
+	if len(warnings) > 0 {
+		m.notice = m.localizer.Text(i18n.MessageResultWarning, m.notice, strings.Join(warnings, "; "))
 	}
 	m.noticeGeneration++
 }
@@ -2921,7 +3187,10 @@ func (m *Model) prunePendingRecreates() {
 }
 
 func stackUpdateStatus(stack domain.Stack) domain.UpdateStatus {
-	status := domain.UpdateStatus("")
+	if stack.UpdatePending {
+		return stack.Update
+	}
+	status := stack.Update
 	for _, container := range stack.ContainerItems {
 		if container.Update == domain.UpdatePulledPendingRecreate {
 			return domain.UpdatePulledPendingRecreate
@@ -2940,6 +3209,9 @@ func (m *Model) reconcileContainerUpdateResults(action application.Action, targe
 	for _, result := range results {
 		for _, target := range targets {
 			if result.ID != target.ID && (target.Stack == nil || result.ID != target.Stack.Name) {
+				continue
+			}
+			if target.Stack != nil {
 				continue
 			}
 			containers := []actionTarget{target}
@@ -2989,6 +3261,9 @@ func (m *Model) recordPendingRecreate(update domain.ImageUpdate) {
 	}
 	imageID := normalizedImageID(update.ImageID)
 	for _, container := range m.snapshot.Containers {
+		if container.ComposeProject != "" {
+			continue
+		}
 		if update.ContainerID != "" && container.ID != update.ContainerID {
 			continue
 		}
@@ -3002,7 +3277,7 @@ func (m *Model) recordPendingRecreate(update domain.ImageUpdate) {
 		if update.Reference != "" {
 			reference = update.Reference
 		}
-		m.pendingRecreates[container.ID] = pendingImageRecreate{ContainerID: container.ID, ImageID: container.ImageID, Reference: reference, Compose: container.ComposeProject != ""}
+		m.pendingRecreates[container.ID] = pendingImageRecreate{ContainerID: container.ID, ImageID: container.ImageID, Reference: reference}
 	}
 }
 
@@ -3337,6 +3612,18 @@ func (m Model) headerSummary() string {
 }
 
 func (m Model) footer(layout sharedui.Layout) string {
+	if m.advanced.stage != advancedClosed {
+		switch m.advanced.stage {
+		case advancedConfirm:
+			return m.localizer.Text(i18n.MessageAdvancedConfirmControls)
+		case advancedRunning:
+			return m.localizer.Text(i18n.MessageAdvancedRunning)
+		case advancedResult:
+			return m.localizer.Text(i18n.MessageAdvancedResultControls)
+		default:
+			return m.localizer.Text(i18n.MessageAdvancedControls)
+		}
+	}
 	if m.action.stage == actionConfirm {
 		return m.localizer.Text(i18n.MessageFooterConfirmation)
 	}

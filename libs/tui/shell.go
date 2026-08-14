@@ -65,11 +65,11 @@ type keyMap struct {
 
 func defaultKeys(localizer Localizer) keyMap {
 	return keyMap{
-		quit: key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", localizer.Text(MessageShellKeyQuit))),
-		next: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", localizer.Text(MessageShellKeyNext))),
-		prev: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", localizer.Text(MessageShellKeyPrevious))),
-		help: key.NewBinding(key.WithKeys("?"), key.WithHelp("?", localizer.Text(MessageShellKeyHelp))),
-		back: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", localizer.Text(MessageShellKeyBack))),
+		quit: key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("[q]", localizer.Text(MessageShellKeyQuit))),
+		next: key.NewBinding(key.WithKeys("tab"), key.WithHelp("[Tab]", localizer.Text(MessageShellKeyNext))),
+		prev: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("[Shift+Tab]", localizer.Text(MessageShellKeyPrevious))),
+		help: key.NewBinding(key.WithKeys("?"), key.WithHelp("[?]", localizer.Text(MessageShellKeyHelp))),
+		back: key.NewBinding(key.WithKeys("esc"), key.WithHelp("[Esc]", localizer.Text(MessageShellKeyBack))),
 	}
 }
 
@@ -195,7 +195,7 @@ func (m shellModel) renderTabs(layout Layout) string {
 	parts := make([]string, 0, len(m.views))
 	for index, view := range m.views {
 		label := view.Title
-		if view.Status != StatusReady {
+		if view.Status != StatusReady && view.Status != StatusEmpty {
 			label = m.localizer.Text(view.Status.messageID()) + " " + label
 		}
 		if index == m.active {
@@ -212,10 +212,10 @@ func (m shellModel) renderContent() string {
 	if m.showHelp {
 		return strings.Join([]string{
 			m.theme.sectionTitle.Render(m.localizer.Text(MessageShellHelpTitle)),
-			m.localizer.Text(MessageShellHelpNextView),
-			m.localizer.Text(MessageShellHelpPreviousView),
-			m.localizer.Text(MessageShellHelpClose),
-			m.localizer.Text(MessageShellHelpQuit),
+			bracketKeyboardKeys(m.localizer.Text(MessageShellHelpNextView)),
+			bracketKeyboardKeys(m.localizer.Text(MessageShellHelpPreviousView)),
+			bracketKeyboardKeys(m.localizer.Text(MessageShellHelpClose)),
+			bracketKeyboardKeys(m.localizer.Text(MessageShellHelpQuit)),
 		}, "\n")
 	}
 
@@ -249,7 +249,7 @@ func (m shellModel) renderContent() string {
 
 func (m shellModel) renderContentDense(layout Layout) string {
 	if m.showHelp {
-		return fitBlock(m.localizer.Text(MessageShellHelpCompact), layout.ContentWidth)
+		return fitBlock(bracketKeyboardKeys(m.localizer.Text(MessageShellHelpCompact)), layout.ContentWidth)
 	}
 
 	view := m.activeView()
@@ -294,7 +294,7 @@ func (m shellModel) renderFooter(layout Layout) string {
 	if m.footerNotice != "" {
 		parts = append(parts, ansi.Truncate(m.theme.statusWarning.Bold(true).Render(m.footerNotice), layout.ContentWidth, "..."))
 	}
-	parts = append(parts, ansi.Truncate(m.theme.help.Render(footer), layout.ContentWidth, "..."))
+	parts = append(parts, ansi.Truncate(m.theme.help.Render(bracketKeyboardKeys(footer)), layout.ContentWidth, "..."))
 	return strings.Join(parts, "\n")
 }
 
@@ -345,6 +345,64 @@ func fitBlock(value string, width int) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+func bracketKeyboardKeys(value string) string {
+	keys := []struct {
+		value string
+		label string
+	}{
+		{value: "shift+tab", label: "Shift+Tab"},
+		{value: "tab", label: "Tab"},
+		{value: "esc", label: "Esc"},
+		{value: "q", label: "q"},
+		{value: "?", label: "?"},
+	}
+
+	var result strings.Builder
+	for index := 0; index < len(value); {
+		if value[index] == '[' {
+			if end := strings.IndexByte(value[index:], ']'); end >= 0 {
+				end += index + 1
+				result.WriteString(value[index:end])
+				index = end
+				continue
+			}
+		}
+
+		matched := false
+		for _, key := range keys {
+			end := index + len(key.value)
+			if end > len(value) || !strings.EqualFold(value[index:end], key.value) {
+				continue
+			}
+			if index > 0 && isKeyboardKeyCharacter(value[index-1]) {
+				continue
+			}
+			if end < len(value) && isKeyboardKeyCharacter(value[end]) {
+				continue
+			}
+
+			result.WriteByte('[')
+			result.WriteString(key.label)
+			result.WriteByte(']')
+			index = end
+			matched = true
+			break
+		}
+		if matched {
+			continue
+		}
+
+		result.WriteByte(value[index])
+		index++
+	}
+
+	return result.String()
+}
+
+func isKeyboardKeyCharacter(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '+'
 }
 
 func (m shellModel) tabPosition() string {

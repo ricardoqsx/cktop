@@ -103,6 +103,12 @@ func NormalizeImageReference(reference string) (string, bool) {
 			name = "docker.io/" + name
 		}
 	}
+	if !strings.Contains(name, "@") {
+		lastSlash := strings.LastIndexByte(name, '/')
+		if strings.LastIndexByte(name, ':') <= lastSlash {
+			name += ":latest"
+		}
+	}
 	return name, true
 }
 
@@ -122,7 +128,7 @@ func (s *ImageUpdateService) Scan(ctx context.Context, snapshot domain.Snapshot,
 	}
 	refs := make(map[string][]scanTarget)
 	for _, container := range snapshot.Containers {
-		if container.State != "running" {
+		if container.State != "running" || container.ComposeOneOff {
 			continue
 		}
 		reference, ok := NormalizeImageReference(container.Image)
