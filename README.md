@@ -29,18 +29,18 @@ La distribución de `dtop` se prepara para:
 
 Windows nativo, ejecutables `.exe`, PowerShell y conexión mediante Docker named pipe no forman parte del alcance. Docker remoto por SSH o TLS tampoco se anuncia como compatible en esta versión.
 
-## Release dtop v0.4.0
+## Release dtop v0.4.1
 
-La primera versión estable local-only se distribuye mediante un instalador fijado al tag versionado `dtop-v0.4.0`, que no debe moverse ni reemplazarse después de publicar:
+La release estable local-only recomendada se distribuye mediante un instalador fijado al tag versionado `dtop-v0.4.1`, que no debe moverse ni reemplazarse después de publicar. `v0.4.1` reemplaza a `v0.4.0` porque corrige las rutas del instalador y la clave pública dentro de `SHA256SUMS`; los binarios de aplicación mantienen el mismo alcance funcional.
 
 ```bash
-curl -fsSL https://github.com/ricardoqsx/cktop/releases/download/dtop-v0.4.0/install-dtop.sh | sh
+curl -fsSL https://github.com/ricardoqsx/cktop/releases/download/dtop-v0.4.1/install-dtop.sh | sh
 ```
 
 Alternativa con `wget`:
 
 ```bash
-wget -qO- https://github.com/ricardoqsx/cktop/releases/download/dtop-v0.4.0/install-dtop.sh | sh
+wget -qO- https://github.com/ricardoqsx/cktop/releases/download/dtop-v0.4.1/install-dtop.sh | sh
 ```
 
 El instalador:
@@ -57,10 +57,10 @@ El instalador:
 Para CI o instalación no interactiva del usuario actual:
 
 ```bash
-curl -fsSL https://github.com/ricardoqsx/cktop/releases/download/dtop-v0.4.0/install-dtop.sh | sh -s -- --yes --scope user
+curl -fsSL https://github.com/ricardoqsx/cktop/releases/download/dtop-v0.4.1/install-dtop.sh | sh -s -- --yes --scope user
 ```
 
-Para instalar otra versión, se reemplaza `0.4.0` en la URL por la versión publicada correspondiente. Cada instalador contiene los hashes exactos de sus propios assets; no se debe usar una URL `latest`.
+Para instalar otra versión, se reemplaza `0.4.1` en la URL por la versión publicada correspondiente. Cada instalador contiene los hashes exactos de sus propios assets; no se debe usar una URL `latest`.
 
 Rutas predeterminadas:
 
@@ -75,7 +75,7 @@ Los assets manuales, `SHA256SUMS`, `SHA256SUMS.minisig`, la clave pública `dtop
 
 ```bash
 minisign -Vm SHA256SUMS -x SHA256SUMS.minisig -p dtop.minisign.pub
-asset=dtop_0.4.0_darwin_arm64.tar.gz
+asset=dtop_0.4.1_darwin_arm64.tar.gz
 grep " $asset$" SHA256SUMS | shasum -a 256 -c -
 ```
 

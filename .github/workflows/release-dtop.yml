@@ -112,8 +112,11 @@ jobs:
             '${{ steps.signing.outputs.public_key }}' \
             scripts/install-dtop.sh \
             dist/install-dtop.sh
-          sha256sum dist/install-dtop.sh dist/dtop.minisign.pub >> dist/SHA256SUMS
-          LC_ALL=C sort -k2,2 -o dist/SHA256SUMS dist/SHA256SUMS
+          (
+            cd dist
+            sha256sum install-dtop.sh dtop.minisign.pub >> SHA256SUMS
+            LC_ALL=C sort -k2,2 -o SHA256SUMS SHA256SUMS
+          )
 
       - name: Sign release checksums
         env:

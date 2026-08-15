@@ -1,5 +1,7 @@
 # dtop v0.4.0
 
+> Superseded by `v0.4.1`: the application archives are valid, but two entries in this release's `SHA256SUMS` include an incorrect `dist/` prefix. Use `v0.4.1` for installation and complete manual verification.
+
 First stable local-only release of `dtop`.
 
 ## Included

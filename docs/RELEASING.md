@@ -22,8 +22,8 @@ En GitHub debe configurarse además un ruleset que impida mover o eliminar tags 
 3. Crear y subir el tag sin moverlo posteriormente:
 
 ```bash
-git tag -a dtop-v0.4.0 -m "dtop v0.4.0"
-git push origin dtop-v0.4.0
+git tag -a dtop-v0.4.1 -m "dtop v0.4.1"
+git push origin dtop-v0.4.1
 ```
 
 El workflow valida, genera cuatro archivos deterministas, firma checksums, renderiza y prueba el instalador, crea attestations y publica el release. Rechaza sobrescribir un release existente.
