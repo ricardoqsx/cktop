@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	mobynetwork "github.com/moby/moby/api/types/network"
 	mobyvolume "github.com/moby/moby/api/types/volume"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/domain"
+	"github.com/ricardoqsx/cktop/apps/dtop/internal/sanitize"
 )
 
 func TestRuntimeSnapshotIntegration(t *testing.T) {
@@ -180,6 +182,32 @@ func TestResourceMappingsReuseOneContainerList(t *testing.T) {
 	}
 }
 
+func BenchmarkRuntimeSnapshotIntegration(b *testing.B) {
+	if os.Getenv("DTOP_INTEGRATION") != "1" {
+		b.Skip("set DTOP_INTEGRATION=1 to benchmark the configured Docker Engine")
+	}
+	runtime := NewRuntime(ResolverOptions{})
+	b.ResetTimer()
+	for range b.N {
+		if _, err := runtime.Snapshot(context.Background()); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRuntimeLoadResourcesIntegration(b *testing.B) {
+	if os.Getenv("DTOP_INTEGRATION") != "1" {
+		b.Skip("set DTOP_INTEGRATION=1 to benchmark the configured Docker Engine")
+	}
+	runtime := NewRuntime(ResolverOptions{})
+	b.ResetTimer()
+	for range b.N {
+		if _, err := runtime.LoadResources(context.Background()); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestRuntimeNetworkAndVolumeIntegration(t *testing.T) {
 	if os.Getenv("DTOP_INTEGRATION") != "1" {
 		t.Skip("set DTOP_INTEGRATION=1 to test against the configured Docker Engine")
@@ -231,6 +259,22 @@ func TestLineWriterStopsWhenContextIsCancelled(t *testing.T) {
 	_, err := writer.Write([]byte("line\n"))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected cancelled context, got %v", err)
+	}
+}
+
+func TestLineWriterSanitizesAndBoundsUntrustedLogs(t *testing.T) {
+	lines := make(chan string, 1)
+	writer := lineWriter{ctx: context.Background(), lines: lines}
+	input := "safe\x1b]52;c;secret\a" + strings.Repeat("x", sanitize.MaxLogLineRunes) + "\n"
+	if _, err := writer.Write([]byte(input)); err != nil {
+		t.Fatal(err)
+	}
+	got := <-lines
+	if strings.ContainsAny(got, "\x1b\a") {
+		t.Fatalf("sanitized log contains terminal controls: %q", got)
+	}
+	if len([]rune(got)) > sanitize.MaxLogLineRunes+3 {
+		t.Fatalf("sanitized log is not bounded: %d runes", len([]rune(got)))
 	}
 }
 

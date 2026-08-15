@@ -16,6 +16,7 @@ import (
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/domain"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/i18n"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/ports"
+	"github.com/ricardoqsx/cktop/apps/dtop/internal/sanitize"
 	sharedui "github.com/ricardoqsx/cktop/libs/tui"
 )
 
@@ -910,10 +911,10 @@ func (m Model) imagesView(layout sharedui.Layout) sharedui.View {
 	}
 	if m.imagesErr != nil {
 		if len(m.images) > 0 {
-			return sharedui.View{Title: title, Status: sharedui.StatusWarning, Summary: m.localizer.Text(i18n.MessageImagesPartial) + m.imagesErr.Error(), Sections: []sharedui.Section{{Body: renderImagesLocalized(m.images, m.selectedImageID, m.selectedImages, m.imageEditing, layout, m.now(), m.accentColor, m.focusColor, m.localizer)}}}
+			return sharedui.View{Title: title, Status: sharedui.StatusWarning, Summary: m.localizer.Text(i18n.MessageImagesPartial) + safeError(m.imagesErr), Sections: []sharedui.Section{{Body: renderImagesLocalized(m.images, m.selectedImageID, m.selectedImages, m.imageEditing, layout, m.now(), m.accentColor, m.focusColor, m.localizer)}}}
 		}
 		return sharedui.View{
-			Title: title, Status: sharedui.StatusError, Summary: m.imagesErr.Error(),
+			Title: title, Status: sharedui.StatusError, Summary: safeError(m.imagesErr),
 			Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageCommonRetry)}},
 		}
 	}
@@ -933,7 +934,7 @@ func (m Model) imageDetailsView() sharedui.View {
 	}
 	if m.imageDetailErr != nil {
 		return sharedui.View{
-			Title: title, Status: sharedui.StatusError, Summary: m.imageDetailErr.Error(),
+			Title: title, Status: sharedui.StatusError, Summary: safeError(m.imageDetailErr),
 			Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageCommonBack)}},
 		}
 	}
@@ -967,9 +968,9 @@ func (m Model) networksView(layout sharedui.Layout) sharedui.View {
 	}
 	if m.networksErr != nil {
 		if len(m.networks) > 0 {
-			return sharedui.View{Title: title, Status: sharedui.StatusWarning, Summary: m.localizer.Text(i18n.MessageNetworksPartial) + m.networksErr.Error(), Sections: []sharedui.Section{{Body: renderNetworksLocalized(m.networks, m.selectedNetworkID, m.selectedNetworks, m.networkEditing, layout, m.now(), m.accentColor, m.focusColor, m.localizer)}}}
+			return sharedui.View{Title: title, Status: sharedui.StatusWarning, Summary: m.localizer.Text(i18n.MessageNetworksPartial) + safeError(m.networksErr), Sections: []sharedui.Section{{Body: renderNetworksLocalized(m.networks, m.selectedNetworkID, m.selectedNetworks, m.networkEditing, layout, m.now(), m.accentColor, m.focusColor, m.localizer)}}}
 		}
-		return sharedui.View{Title: title, Status: sharedui.StatusError, Summary: m.networksErr.Error(), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageCommonRetry)}}}
+		return sharedui.View{Title: title, Status: sharedui.StatusError, Summary: safeError(m.networksErr), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageCommonRetry)}}}
 	}
 	if len(m.networks) == 0 {
 		return sharedui.View{Title: title, Status: sharedui.StatusEmpty, Summary: m.localizer.Text(i18n.MessageNetworksEmpty)}
@@ -986,7 +987,7 @@ func (m Model) networkDetailsView() sharedui.View {
 		return sharedui.View{Title: title, Status: sharedui.StatusLoading, Summary: m.localizer.Text(i18n.MessageNetworkDetailsLoad)}
 	}
 	if m.networkDetailErr != nil {
-		return sharedui.View{Title: title, Status: sharedui.StatusError, Summary: m.networkDetailErr.Error(), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageCommonBack)}}}
+		return sharedui.View{Title: title, Status: sharedui.StatusError, Summary: safeError(m.networkDetailErr), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageCommonBack)}}}
 	}
 	details := m.networkDetails
 	containers := "-"
@@ -1006,9 +1007,9 @@ func (m Model) volumesView(layout sharedui.Layout) sharedui.View {
 	}
 	if m.volumesErr != nil {
 		if len(m.volumes) > 0 {
-			return sharedui.View{Title: title, Status: sharedui.StatusWarning, Summary: m.localizer.Text(i18n.MessageVolumesPartial) + m.volumesErr.Error(), Sections: []sharedui.Section{{Body: renderVolumesLocalized(m.volumes, m.selectedVolumeName, m.selectedVolumes, m.volumeEditing, layout, m.now(), m.accentColor, m.focusColor, m.localizer)}}}
+			return sharedui.View{Title: title, Status: sharedui.StatusWarning, Summary: m.localizer.Text(i18n.MessageVolumesPartial) + safeError(m.volumesErr), Sections: []sharedui.Section{{Body: renderVolumesLocalized(m.volumes, m.selectedVolumeName, m.selectedVolumes, m.volumeEditing, layout, m.now(), m.accentColor, m.focusColor, m.localizer)}}}
 		}
-		return sharedui.View{Title: title, Status: sharedui.StatusError, Summary: m.volumesErr.Error(), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageCommonRetry)}}}
+		return sharedui.View{Title: title, Status: sharedui.StatusError, Summary: safeError(m.volumesErr), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageCommonRetry)}}}
 	}
 	if len(m.volumes) == 0 {
 		return sharedui.View{Title: title, Status: sharedui.StatusEmpty, Summary: m.localizer.Text(i18n.MessageVolumesEmpty)}
@@ -1025,7 +1026,7 @@ func (m Model) volumeDetailsView() sharedui.View {
 		return sharedui.View{Title: title, Status: sharedui.StatusLoading, Summary: m.localizer.Text(i18n.MessageVolumeDetailsLoad)}
 	}
 	if m.volumeDetailErr != nil {
-		return sharedui.View{Title: title, Status: sharedui.StatusError, Summary: m.volumeDetailErr.Error(), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageCommonBack)}}}
+		return sharedui.View{Title: title, Status: sharedui.StatusError, Summary: safeError(m.volumeDetailErr), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageCommonBack)}}}
 	}
 	details := m.volumeDetails
 	options := "-"
@@ -2303,9 +2304,9 @@ func (m Model) advancedView(title string, layout sharedui.Layout) sharedui.View 
 		if m.advanced.result.Err != nil {
 			status = sharedui.StatusError
 			if body != "" {
-				body = m.advanced.result.Err.Error() + "\n\n" + body
+				body = safeError(m.advanced.result.Err) + "\n\n" + body
 			} else {
-				body = m.advanced.result.Err.Error()
+				body = safeError(m.advanced.result.Err)
 			}
 		}
 		if body == "" {
@@ -3053,7 +3054,7 @@ func (m *Model) showActionResult(results []application.ActionResult) {
 	warnings := make([]string, 0)
 	for _, result := range results {
 		if result.Warning != nil {
-			warnings = append(warnings, result.Warning.Error())
+			warnings = append(warnings, safeError(result.Warning))
 		}
 	}
 	if len(warnings) > 0 {
@@ -3362,7 +3363,7 @@ func (m Model) containersView(layout sharedui.Layout) sharedui.View {
 	}
 	if m.shellErr != nil {
 		return sharedui.View{
-			Title: title, Status: sharedui.StatusError, Summary: m.localizer.Text(i18n.MessageContainerShellFailed) + m.shellErr.Error(),
+			Title: title, Status: sharedui.StatusError, Summary: m.localizer.Text(i18n.MessageContainerShellFailed) + safeError(m.shellErr),
 			Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageContainerShellFailureNext)}},
 		}
 	}
@@ -3442,7 +3443,7 @@ func (m Model) detailsView() sharedui.View {
 	}
 	if m.detailErr != nil {
 		return sharedui.View{
-			Title: title, Status: sharedui.StatusError, Summary: m.detailErr.Error(),
+			Title: title, Status: sharedui.StatusError, Summary: safeError(m.detailErr),
 			Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionControls), Body: m.localizer.Text(i18n.MessageCommonBack)}},
 		}
 	}
@@ -3472,7 +3473,7 @@ func (m Model) logsView(layout sharedui.Layout) sharedui.View {
 		status = m.localizer.Text(i18n.MessageLogsFollowing)
 	}
 	if m.logErr != nil {
-		status = m.logErr.Error()
+		status = safeError(m.logErr)
 	}
 	lines := visibleLogs(m.logLines, m.logOffset, logLineCount(layout))
 	body := m.localizer.Text(i18n.MessageLogsEmpty)
@@ -3566,7 +3567,14 @@ func dockerErrorSummaryLocalized(err error, localizer sharedui.Localizer) string
 		return localizer.Text(i18n.MessageDockerRemoteUnsupported)
 	}
 
-	return err.Error()
+	return safeError(err)
+}
+
+func safeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return sanitize.TerminalText(err.Error(), sanitize.MaxErrorRunes)
 }
 
 func yesNo(value bool) string {

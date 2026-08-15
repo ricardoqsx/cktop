@@ -53,7 +53,7 @@ func newComposeUpdateCoordinator(store ports.ComposeUpdateStore) *composeUpdateC
 	}
 }
 
-func (state *composeUpdateCoordinator) get(project string) (domain.ComposeUpdateProject, bool) {
+func (state *composeUpdateCoordinator) get(ctx context.Context, project string) (domain.ComposeUpdateProject, bool) {
 	if state == nil {
 		return domain.ComposeUpdateProject{}, false
 	}
@@ -66,10 +66,10 @@ func (state *composeUpdateCoordinator) get(project string) (domain.ComposeUpdate
 	if state.store == nil {
 		return domain.ComposeUpdateProject{}, false
 	}
-	return state.store.Get(project)
+	return state.store.Get(ctx, project)
 }
 
-func (state *composeUpdateCoordinator) put(project domain.ComposeUpdateProject) error {
+func (state *composeUpdateCoordinator) put(ctx context.Context, project domain.ComposeUpdateProject) error {
 	if state == nil {
 		return errors.New("Compose update state is unavailable")
 	}
@@ -80,7 +80,7 @@ func (state *composeUpdateCoordinator) put(project domain.ComposeUpdateProject) 
 		state.mu.Unlock()
 		return nil
 	}
-	err := state.store.Put(project)
+	err := state.store.Put(ctx, project)
 	state.mu.Lock()
 	if err != nil {
 		state.overrides[project.Name] = cloneComposeUpdateProject(project)
@@ -92,18 +92,18 @@ func (state *composeUpdateCoordinator) put(project domain.ComposeUpdateProject) 
 	return err
 }
 
-func (state *composeUpdateCoordinator) health() error {
+func (state *composeUpdateCoordinator) health(ctx context.Context) error {
 	if state == nil || state.store == nil {
 		return nil
 	}
-	return state.store.Health()
+	return state.store.Health(ctx)
 }
 
-func (state *composeUpdateCoordinator) beginMutation() (func(), error) {
+func (state *composeUpdateCoordinator) beginMutation(ctx context.Context) (func(), error) {
 	if state == nil || state.store == nil {
 		return func() {}, nil
 	}
-	release, err := state.store.BeginMutation()
+	release, err := state.store.BeginMutation(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +286,7 @@ func (s ContainerService) resolveComposeProject(ctx context.Context, stack domai
 		}
 	}
 	registration := registrationFingerprint(stack)
-	project, found := s.composeUpdates.get(stack.Name)
+	project, found := s.composeUpdates.get(ctx, stack.Name)
 	if !found || project.RegistrationFingerprint != registration || project.ConfigFingerprint != configFingerprint {
 		next := domain.ComposeUpdateProject{
 			Name:                    stack.Name,
@@ -338,7 +338,7 @@ func (s ContainerService) pullComposeProject(ctx context.Context, stack domain.S
 		value.PendingUnknown = true
 		resolved.project.Services[service] = value
 	}
-	if err := s.saveResolvedComposeProject(resolved); err != nil {
+	if err := s.saveResolvedComposeProject(ctx, resolved); err != nil {
 		return resolved, false, fmt.Errorf("prepare Compose update state: %w", err), nil
 	}
 	if err := pull(resolved.services); err != nil {
@@ -347,7 +347,7 @@ func (s ContainerService) pullComposeProject(ctx context.Context, stack domain.S
 			value.PendingUnknown = true
 			resolved.project.Services[service] = value
 		}
-		warning := s.saveResolvedComposeProject(resolved)
+		warning := s.saveResolvedComposeProject(ctx, resolved)
 		return resolved, false, err, warning
 	}
 	images, err := s.runtime.Images(ctx)
@@ -357,7 +357,7 @@ func (s ContainerService) pullComposeProject(ctx context.Context, stack domain.S
 			value.PendingUnknown = true
 			resolved.project.Services[service] = value
 		}
-		warning := s.saveResolvedComposeProject(resolved)
+		warning := s.saveResolvedComposeProject(ctx, resolved)
 		return resolved, true, fmt.Errorf("verify pulled Compose images: %w", err), warning
 	}
 	var verificationErrors []error
@@ -374,7 +374,7 @@ func (s ContainerService) pullComposeProject(ctx context.Context, stack domain.S
 		}
 		resolved.project.Services[service] = value
 	}
-	warning := s.saveResolvedComposeProject(resolved)
+	warning := s.saveResolvedComposeProject(ctx, resolved)
 	if len(verificationErrors) > 0 {
 		return resolved, true, fmt.Errorf("verify pulled Compose images: %w", errors.Join(verificationErrors...)), warning
 	}
@@ -488,8 +488,8 @@ func (s ContainerService) captureAppliedComposeBaseline(ctx context.Context, sta
 	}
 }
 
-func (s ContainerService) saveResolvedComposeProject(resolved resolvedComposeProject) error {
-	err := s.composeUpdates.put(resolved.project)
+func (s ContainerService) saveResolvedComposeProject(ctx context.Context, resolved resolvedComposeProject) error {
+	err := s.composeUpdates.put(ctx, resolved.project)
 	s.composeUpdates.setCache(resolved.project.Name, composeUpdateCache{project: resolved.project, eligible: true})
 	if err != nil {
 		return fmt.Errorf("Compose update state was not saved: %w", err)
@@ -499,7 +499,7 @@ func (s ContainerService) saveResolvedComposeProject(resolved resolvedComposePro
 
 func (s ContainerService) applyComposeProject(ctx context.Context, stack domain.Stack, services []string, expected map[string]string, up func() error) (resolvedComposeProject, error, error) {
 	if len(services) == 0 {
-		if project, found := s.composeUpdates.get(stack.Name); found && project.RegistrationFingerprint == registrationFingerprint(stack) {
+		if project, found := s.composeUpdates.get(ctx, stack.Name); found && project.RegistrationFingerprint == registrationFingerprint(stack) {
 			for service, value := range project.Services {
 				if value.PendingUnknown || value.DownloadedDigest != "" && value.DownloadedDigest != value.AppliedDigest {
 					services = append(services, service)
@@ -544,7 +544,7 @@ func (s ContainerService) applyComposeProject(ctx context.Context, stack domain.
 		value.PendingUnknown = false
 		resolved.project.Services[service] = value
 	}
-	warning := s.saveResolvedComposeProject(resolved)
+	warning := s.saveResolvedComposeProject(ctx, resolved)
 	return resolved, nil, warning
 }
 
@@ -573,10 +573,10 @@ func (s ContainerService) verifyAppliedComposeProject(ctx context.Context, stack
 }
 
 func (s ContainerService) composeUpBlocked(ctx context.Context, stack domain.Stack) error {
-	if err := s.composeUpdates.health(); err != nil {
+	if err := s.composeUpdates.health(ctx); err != nil {
 		return fmt.Errorf("Compose update state is unavailable; refusing Up: %w", err)
 	}
-	project, found := s.composeUpdates.get(stack.Name)
+	project, found := s.composeUpdates.get(ctx, stack.Name)
 	if !found || !project.Pending() {
 		return nil
 	}
@@ -591,16 +591,20 @@ func (s ContainerService) composeUpBlocked(ctx context.Context, stack domain.Sta
 }
 
 func (s ContainerService) refreshComposeUpdateState(ctx context.Context, stacks []domain.Stack) {
+	revision := s.composeUpdates.currentRevision()
+	if err := s.composeUpdates.health(ctx); err != nil {
+		for _, stack := range stacks {
+			if stack.Registered {
+				s.composeUpdates.setCacheAtRevision(stack.Name, composeUpdateCache{project: domain.ComposeUpdateProject{Name: stack.Name}, eligible: true, reason: err.Error()}, revision)
+			}
+		}
+		return
+	}
 	for _, stack := range stacks {
 		if !stack.Registered {
 			continue
 		}
-		revision := s.composeUpdates.currentRevision()
-		if err := s.composeUpdates.health(); err != nil {
-			s.composeUpdates.setCacheAtRevision(stack.Name, composeUpdateCache{project: domain.ComposeUpdateProject{Name: stack.Name}, eligible: true, reason: err.Error()}, revision)
-			continue
-		}
-		project, found := s.composeUpdates.get(stack.Name)
+		project, found := s.composeUpdates.get(ctx, stack.Name)
 		if !found || !project.Pending() {
 			s.composeUpdates.setCacheAtRevision(stack.Name, composeUpdateCache{}, revision)
 			continue

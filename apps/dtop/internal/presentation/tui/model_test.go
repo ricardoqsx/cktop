@@ -21,6 +21,13 @@ import (
 	sharedui "github.com/ricardoqsx/cktop/libs/tui"
 )
 
+func TestSafeErrorRemovesTerminalControls(t *testing.T) {
+	got := safeError(errors.New("failure\x1b]52;c;secret\a\x1b[31m"))
+	if strings.ContainsAny(got, "\x1b\a") {
+		t.Fatalf("safeError() contains terminal controls: %q", got)
+	}
+}
+
 func TestModelRendersLoadedContainers(t *testing.T) {
 	service := application.NewContainerService(fakeRuntime{snapshot: domain.Snapshot{
 		Engine: domain.EngineInfo{Name: "local", Endpoint: "unix:///tmp/docker.sock", Transport: "unix"},
@@ -1097,9 +1104,9 @@ func TestPersistedComposePullReplacesDownStackUpWithConfirmedApply(t *testing.T)
 	if confirmation.action.stage != actionConfirm || !strings.Contains(confirmation.confirmationBanner(), "CONFIRM: Apply downloaded update") {
 		t.Fatalf("Apply did not require confirmation: %q", confirmation.confirmationBanner())
 	}
-	before, _ := store.Get("app")
+	before, _ := store.Get(context.Background(), "app")
 	updated, command := confirmation.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	after, _ := store.Get("app")
+	after, _ := store.Get(context.Background(), "app")
 	if command != nil || updated.(Model).action.stage != actionNone || !reflect.DeepEqual(before, after) {
 		t.Fatal("cancelling Apply mutated persistent state")
 	}
@@ -2104,7 +2111,7 @@ type tuiComposeUpdateStore struct {
 	projects map[string]domain.ComposeUpdateProject
 }
 
-func (store *tuiComposeUpdateStore) Get(project string) (domain.ComposeUpdateProject, bool) {
+func (store *tuiComposeUpdateStore) Get(_ context.Context, project string) (domain.ComposeUpdateProject, bool) {
 	value, found := store.projects[project]
 	copy := value
 	copy.Services = make(map[string]domain.ComposeUpdateService, len(value.Services))
@@ -2114,7 +2121,7 @@ func (store *tuiComposeUpdateStore) Get(project string) (domain.ComposeUpdatePro
 	return copy, found
 }
 
-func (store *tuiComposeUpdateStore) Put(project domain.ComposeUpdateProject) error {
+func (store *tuiComposeUpdateStore) Put(_ context.Context, project domain.ComposeUpdateProject) error {
 	copy := project
 	copy.Services = make(map[string]domain.ComposeUpdateService, len(project.Services))
 	for name, service := range project.Services {
@@ -2124,6 +2131,8 @@ func (store *tuiComposeUpdateStore) Put(project domain.ComposeUpdateProject) err
 	return nil
 }
 
-func (store *tuiComposeUpdateStore) Health() error { return nil }
+func (store *tuiComposeUpdateStore) Health(context.Context) error { return nil }
 
-func (store *tuiComposeUpdateStore) BeginMutation() (func(), error) { return func() {}, nil }
+func (store *tuiComposeUpdateStore) BeginMutation(context.Context) (func(), error) {
+	return func() {}, nil
+}

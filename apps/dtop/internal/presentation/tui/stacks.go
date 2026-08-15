@@ -17,13 +17,13 @@ func (m Model) stacksView(layout sharedui.Layout) sharedui.View {
 		return sharedui.View{Title: m.localizer.Text(i18n.MessageTabStacks), Status: sharedui.StatusLoading, Summary: m.localizer.Text(i18n.MessageStacksLoading)}
 	}
 	if m.stacksErr != nil {
-		return sharedui.View{Title: m.localizer.Text(i18n.MessageTabStacks), Status: sharedui.StatusError, Summary: m.stacksErr.Error(), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageCommonRetry)}}}
+		return sharedui.View{Title: m.localizer.Text(i18n.MessageTabStacks), Status: sharedui.StatusError, Summary: safeError(m.stacksErr), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageCommonRetry)}}}
 	}
 	if m.shellActive {
 		return sharedui.View{Title: m.localizer.Text(i18n.MessageContainerShellTitle), Status: sharedui.StatusLoading, Summary: m.localizer.Text(i18n.MessageContainerShellStarting)}
 	}
 	if m.shellErr != nil {
-		return sharedui.View{Title: m.localizer.Text(i18n.MessageTabStacks), Status: sharedui.StatusError, Summary: m.localizer.Text(i18n.MessageContainerShellFailed) + m.shellErr.Error(), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageContainerShellFailureNext)}}}
+		return sharedui.View{Title: m.localizer.Text(i18n.MessageTabStacks), Status: sharedui.StatusError, Summary: m.localizer.Text(i18n.MessageContainerShellFailed) + safeError(m.shellErr), Sections: []sharedui.Section{{Title: m.localizer.Text(i18n.MessageSectionNext), Body: m.localizer.Text(i18n.MessageContainerShellFailureNext)}}}
 	}
 	if len(m.stacks) == 0 && len(m.stackDiagnostics) == 0 {
 		return sharedui.View{Title: m.localizer.Text(i18n.MessageTabStacks), Status: sharedui.StatusEmpty, Summary: m.localizer.Text(i18n.MessageStacksEmpty)}

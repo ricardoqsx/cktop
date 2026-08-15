@@ -1,0 +1,172 @@
+name: Release dtop
+
+on:
+  push:
+    tags:
+      - 'dtop-v*'
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    name: Build and release dtop
+    runs-on: ubuntu-24.04
+    env:
+      MINISIGN_ARCHIVE_SHA256: 9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: |
+            apps/*/go.sum
+            libs/*/go.sum
+
+      - name: Resolve release metadata
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#dtop-v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Invalid dtop release tag: $GITHUB_REF_NAME" >&2
+            exit 1
+          }
+          {
+            echo "version=$version"
+            echo "commit=$(git rev-parse --short=12 HEAD)"
+            echo "build_date=$(git show -s --format=%cI HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate dtop
+        run: |
+          test -z "$(gofmt -l apps/dtop libs/tui)"
+          go test -race ./apps/dtop/... ./libs/tui/...
+          go vet ./apps/dtop/... ./libs/tui/...
+
+      - name: Build deterministic archives
+        run: |
+          go run ./scripts/package-dtop.go \
+            '${{ steps.metadata.outputs.version }}' \
+            '${{ steps.metadata.outputs.commit }}' \
+            '${{ steps.metadata.outputs.build_date }}' \
+            dist
+
+      - name: Install pinned Minisign
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 \
+            https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz \
+            -o /tmp/minisign.tar.gz
+          echo "$MINISIGN_ARCHIVE_SHA256  /tmp/minisign.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/minisign.tar.gz -C /tmp
+          mkdir -p "$RUNNER_TEMP/bin"
+          install -m 0755 /tmp/minisign-linux/x86_64/minisign "$RUNNER_TEMP/bin/minisign"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Derive Minisign public key
+        id: signing
+        env:
+          MINISIGN_SECRET_KEY_B64: ${{ secrets.DTOP_MINISIGN_SECRET_KEY_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "$MINISIGN_SECRET_KEY_B64" ] || {
+            echo 'Missing DTOP_MINISIGN_SECRET_KEY_B64 repository secret' >&2
+            exit 1
+          }
+          key_file=$(mktemp)
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$MINISIGN_SECRET_KEY_B64" | base64 --decode > "$key_file"
+          chmod 0600 "$key_file"
+          [ -f configs/dtop.minisign.pub ] || {
+            echo 'Missing committed configs/dtop.minisign.pub trust anchor' >&2
+            exit 1
+          }
+          minisign -R -s "$key_file" -p "$RUNNER_TEMP/derived.minisign.pub"
+          cmp configs/dtop.minisign.pub "$RUNNER_TEMP/derived.minisign.pub" || {
+            echo 'Minisign secret does not match configs/dtop.minisign.pub' >&2
+            exit 1
+          }
+          cp configs/dtop.minisign.pub dist/dtop.minisign.pub
+          public_key=$(sed -n '2p' dist/dtop.minisign.pub)
+          echo "public_key=$public_key" >> "$GITHUB_OUTPUT"
+
+      - name: Render versioned installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh scripts/render-dtop-installer.sh \
+            '${{ steps.metadata.outputs.version }}' \
+            dist/SHA256SUMS \
+            '${{ steps.signing.outputs.public_key }}' \
+            scripts/install-dtop.sh \
+            dist/install-dtop.sh
+          sha256sum dist/install-dtop.sh dist/dtop.minisign.pub >> dist/SHA256SUMS
+          LC_ALL=C sort -k2,2 -o dist/SHA256SUMS dist/SHA256SUMS
+
+      - name: Sign release checksums
+        env:
+          MINISIGN_SECRET_KEY_B64: ${{ secrets.DTOP_MINISIGN_SECRET_KEY_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_file=$(mktemp)
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$MINISIGN_SECRET_KEY_B64" | base64 --decode > "$key_file"
+          chmod 0600 "$key_file"
+          minisign -S -s "$key_file" -m dist/SHA256SUMS -x dist/SHA256SUMS.minisig \
+            -t "dtop v${{ steps.metadata.outputs.version }} release checksums"
+
+      - name: Test rendered installer
+        run: |
+          sh scripts/test-install-dtop.sh \
+            '${{ steps.metadata.outputs.version }}' \
+            "$PWD/dist" \
+            '${{ steps.signing.outputs.public_key }}'
+
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-path: 'dist/*'
+
+      - name: Publish immutable-version release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes_file="docs/release-notes-v${{ steps.metadata.outputs.version }}.md"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            is_draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)
+            [ "$is_draft" = true ] || {
+              echo "Published release $GITHUB_REF_NAME already exists" >&2
+              exit 1
+            }
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            if [ -f "$notes_file" ]; then
+              gh release create "$GITHUB_REF_NAME" dist/* \
+                --draft \
+                --verify-tag \
+                --title "dtop v${{ steps.metadata.outputs.version }}" \
+                --notes-file "$notes_file"
+            else
+              gh release create "$GITHUB_REF_NAME" dist/* \
+                --draft \
+                --verify-tag \
+                --title "dtop v${{ steps.metadata.outputs.version }}" \
+                --generate-notes
+            fi
+          fi
+          gh release edit "$GITHUB_REF_NAME" --draft=false

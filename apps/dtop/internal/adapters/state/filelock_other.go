@@ -2,9 +2,12 @@
 
 package state
 
-import "os"
+import (
+	"context"
+	"os"
+)
 
-func lockFile(*os.File) (func() error, error) {
+func lockFile(context.Context, *os.File) (func() error, error) {
 	return func() error { return nil }, nil
 }
 

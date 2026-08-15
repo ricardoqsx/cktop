@@ -1,0 +1,25 @@
+# dtop configuration.
+# System: /etc/dtop/dtop.conf
+# User:   ${XDG_CONFIG_HOME:-~/.config}/dtop/dtop.conf
+
+[display]
+# Memory values: usage, percent, or both.
+memory_mode = both
+# ANSI 256-color indexes from 0 through 255.
+accent_color = 63
+focus_color = 15
+
+[updates]
+# Check image references used by running containers.
+enabled = true
+scope = running
+# Minimum: 1m.
+interval = 15m
+# Concurrent remote checks: 1 through 16.
+concurrency = 4
+
+# Register each local Compose project that should remain visible while down.
+# The directory must exist. Relative files resolve from working_dir.
+# [compose "example"]
+# working_dir = /srv/docker/example
+# files = compose.yaml, compose.prod.yaml

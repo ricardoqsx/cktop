@@ -48,8 +48,10 @@ type ComposeProject struct {
 }
 
 type Paths struct {
-	System string
-	User   string
+	System      string
+	User        string
+	Environment string
+	Explicit    string
 }
 
 func Default() Config {
@@ -57,16 +59,36 @@ func Default() Config {
 }
 
 func Load() (Config, error) {
-	return LoadPaths(defaultPaths())
+	return LoadWithPath("")
+}
+
+func LoadWithPath(path string) (Config, error) {
+	paths := defaultPaths()
+	paths.Environment = os.Getenv("DTOP_CONFIG")
+	paths.Explicit = path
+	return LoadPaths(paths)
 }
 
 func LoadPaths(paths Paths) (Config, error) {
 	config := Default()
-	for _, path := range []string{paths.System, paths.User} {
-		if path == "" {
+	sources := []struct {
+		name     string
+		path     string
+		required bool
+	}{
+		{name: "system", path: paths.System},
+		{name: "user", path: paths.User},
+		{name: "DTOP_CONFIG", path: paths.Environment, required: paths.Environment != ""},
+		{name: "--config", path: paths.Explicit, required: paths.Explicit != ""},
+	}
+	for _, source := range sources {
+		if source.path == "" {
 			continue
 		}
-		if err := mergeFile(&config, path); err != nil {
+		if err := mergeFile(&config, source.path, source.required); err != nil {
+			if source.required && errors.Is(err, os.ErrNotExist) {
+				return Config{}, fmt.Errorf("%s file %s does not exist", source.name, source.path)
+			}
 			return Config{}, err
 		}
 	}
@@ -93,9 +115,9 @@ func defaultPaths() Paths {
 	}
 }
 
-func mergeFile(config *Config, path string) error {
+func mergeFile(config *Config, path string, required bool) error {
 	file, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, os.ErrNotExist) && !required {
 		return nil
 	}
 	if err != nil {

@@ -31,10 +31,10 @@ type ComposeServiceImage struct {
 }
 
 type ComposeUpdateStore interface {
-	Get(project string) (domain.ComposeUpdateProject, bool)
-	Put(project domain.ComposeUpdateProject) error
-	Health() error
-	BeginMutation() (func(), error)
+	Get(ctx context.Context, project string) (domain.ComposeUpdateProject, bool)
+	Put(ctx context.Context, project domain.ComposeUpdateProject) error
+	Health(ctx context.Context) error
+	BeginMutation(ctx context.Context) (func(), error)
 }
 
 type Runtime interface {

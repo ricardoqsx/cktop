@@ -15,6 +15,7 @@ import (
 
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/domain"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/ports"
+	"github.com/ricardoqsx/cktop/apps/dtop/internal/sanitize"
 )
 
 const (
@@ -264,7 +265,7 @@ func (r *Runtime) ComposeLogs(ctx context.Context, stack domain.Stack, tail int)
 				scanner.Buffer(make([]byte, 1024), 64*1024)
 				for scanner.Scan() {
 					select {
-					case lines <- scanner.Text():
+					case lines <- sanitize.TerminalLine(scanner.Text()):
 					case <-ctx.Done():
 						return
 					}
@@ -298,12 +299,7 @@ func (w *limitedOutput) Write(data []byte) (int, error) {
 }
 
 func (w *limitedOutput) String() string {
-	return strings.TrimSpace(strings.Map(func(r rune) rune {
-		if r < 32 && r != '\n' && r != '\t' {
-			return -1
-		}
-		return r
-	}, w.Buffer.String()))
+	return strings.TrimSpace(sanitize.TerminalText(w.Buffer.String(), sanitize.MaxErrorRunes))
 }
 
 type boundedOutput struct {

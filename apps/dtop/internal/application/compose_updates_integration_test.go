@@ -81,7 +81,7 @@ func TestComposeUpdatePersistenceMutationIntegration(t *testing.T) {
 	if result := restarted.ActStacks(ctx, ActionApply, []domain.Stack{stack})[0]; result.Err != nil || !result.Applied {
 		t.Fatalf("apply result = %#v", result)
 	}
-	project, found := reopened.Get(name)
+	project, found := reopened.Get(context.Background(), name)
 	if !found || project.Pending() {
 		t.Fatalf("final persisted state = %#v", project)
 	}

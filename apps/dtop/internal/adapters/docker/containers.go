@@ -20,6 +20,7 @@ import (
 	"github.com/moby/moby/client"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/domain"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/ports"
+	"github.com/ricardoqsx/cktop/apps/dtop/internal/sanitize"
 )
 
 type Runtime struct {
@@ -932,7 +933,7 @@ func (w *lineWriter) Write(data []byte) (int, error) {
 		if index < 0 {
 			return len(data), nil
 		}
-		line := strings.TrimSuffix(w.remainder[:index], "\r")
+		line := sanitize.TerminalLine(strings.TrimSuffix(w.remainder[:index], "\r"))
 		w.remainder = w.remainder[index+1:]
 		select {
 		case w.lines <- line:
@@ -947,7 +948,7 @@ func (w *lineWriter) flush() error {
 		return nil
 	}
 	select {
-	case w.lines <- strings.TrimSuffix(w.remainder, "\r"):
+	case w.lines <- sanitize.TerminalLine(strings.TrimSuffix(w.remainder, "\r")):
 		return nil
 	case <-w.ctx.Done():
 		return w.ctx.Err()

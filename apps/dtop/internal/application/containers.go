@@ -268,7 +268,7 @@ func (s ContainerService) actStacks(ctx context.Context, action Action, stacks [
 		result := ActionResult{ID: stack.Name, Action: action}
 		release := func() {}
 		if stack.Registered || action == ActionUp {
-			lockedRelease, lockErr := s.composeUpdates.beginMutation()
+			lockedRelease, lockErr := s.composeUpdates.beginMutation(ctx)
 			if lockedRelease != nil {
 				release = lockedRelease
 			}
@@ -452,7 +452,7 @@ func (s ContainerService) UpdateStackServices(ctx context.Context, action Action
 	results := make([]ActionResult, 0, len(targets))
 	for _, target := range targets {
 		result := ActionResult{ID: target.Stack.Name, Action: action}
-		release, lockErr := s.composeUpdates.beginMutation()
+		release, lockErr := s.composeUpdates.beginMutation(ctx)
 		if lockErr != nil {
 			result.Err = fmt.Errorf("lock Compose update state: %w", lockErr)
 			results = append(results, result)

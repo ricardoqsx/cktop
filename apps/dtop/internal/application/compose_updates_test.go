@@ -24,7 +24,7 @@ func TestComposePullPersistsVerifiedDownloadedDigest(t *testing.T) {
 	if len(results) != 1 || results[0].Err != nil || !results[0].Pulled || results[0].Applied {
 		t.Fatalf("pull results = %#v", results)
 	}
-	project, found := store.Get(stack.Name)
+	project, found := store.Get(context.Background(), stack.Name)
 	if !found {
 		t.Fatal("verified pull did not persist project state")
 	}
@@ -62,7 +62,7 @@ func TestComposeStateSurvivesServiceRestartAndGuardsDownUpUntilApply(t *testing.
 	if apply.Err != nil || !apply.Applied {
 		t.Fatalf("apply result = %#v", apply)
 	}
-	project, _ := store.Get(stack.Name)
+	project, _ := store.Get(context.Background(), stack.Name)
 	web := project.Services["web"]
 	if web.DownloadedDigest != "sha256:new" || web.AppliedDigest != web.DownloadedDigest || project.Pending() {
 		t.Fatalf("applied state = %#v", project)
@@ -153,7 +153,7 @@ func TestComposeServiceApplyChangesOnlySelectedPersistentState(t *testing.T) {
 	if apply.Err != nil || !apply.Applied {
 		t.Fatalf("web apply = %#v", apply)
 	}
-	project, _ := store.Get(stack.Name)
+	project, _ := store.Get(context.Background(), stack.Name)
 	if project.Services["web"].AppliedDigest != "sha256:new" {
 		t.Fatalf("web was not applied: %#v", project.Services["web"])
 	}
@@ -173,7 +173,7 @@ func TestComposePullFailureCreatesUnknownGuardAndRetryRecovers(t *testing.T) {
 	if failed.Err == nil || failed.Pulled {
 		t.Fatalf("failed pull result = %#v", failed)
 	}
-	project, _ := store.Get(stack.Name)
+	project, _ := store.Get(context.Background(), stack.Name)
 	if !project.PendingUnknown() || !project.Pending() {
 		t.Fatalf("failed pull was not recorded conservatively: %#v", project)
 	}
@@ -189,7 +189,7 @@ func TestComposePullFailureCreatesUnknownGuardAndRetryRecovers(t *testing.T) {
 	if retried.Err != nil || !retried.Pulled {
 		t.Fatalf("retry result = %#v", retried)
 	}
-	project, _ = store.Get(stack.Name)
+	project, _ = store.Get(context.Background(), stack.Name)
 	if project.PendingUnknown() || project.Services["web"].DownloadedDigest != "sha256:new" {
 		t.Fatalf("retry did not recover verified state: %#v", project)
 	}
@@ -225,7 +225,7 @@ func TestComposePostPullPersistenceFailureKeepsDurableUnknownMarker(t *testing.T
 	if pull.Err != nil || pull.Warning == nil || !pull.Pulled {
 		t.Fatalf("post-pull persistence result = %#v", pull)
 	}
-	persisted, found := store.Get("app")
+	persisted, found := store.Get(context.Background(), "app")
 	if !found || !persisted.PendingUnknown() {
 		t.Fatalf("write-ahead marker was not preserved: %#v", persisted)
 	}
@@ -263,7 +263,7 @@ func TestComposePullWithoutLocalDigestRemainsUnverified(t *testing.T) {
 	if result.Err == nil || !result.Pulled || !strings.Contains(result.Err.Error(), "RepoDigest") {
 		t.Fatalf("missing digest result = %#v", result)
 	}
-	project, _ := store.Get("app")
+	project, _ := store.Get(context.Background(), "app")
 	if !project.PendingUnknown() {
 		t.Fatalf("missing digest was not retained as unknown: %#v", project)
 	}
@@ -337,7 +337,7 @@ func TestComposePullInitializesAppliedBaselineAndLeavesUnchangedSiblingCurrent(t
 	if result.Err != nil {
 		t.Fatal(result.Err)
 	}
-	project, _ := store.Get("app")
+	project, _ := store.Get(context.Background(), "app")
 	if worker := project.Services["worker"]; worker.DownloadedDigest != "sha256:stable" || worker.AppliedDigest != worker.DownloadedDigest || worker.PendingUnknown {
 		t.Fatalf("unchanged worker became pending: %#v", worker)
 	}
@@ -355,7 +355,7 @@ func TestComposePullTreatsMixedReplicaBaselinesAsPending(t *testing.T) {
 	if result.Err != nil {
 		t.Fatal(result.Err)
 	}
-	project, _ := store.Get("app")
+	project, _ := store.Get(context.Background(), "app")
 	web := project.Services["web"]
 	if web.AppliedDigest != "" || web.DownloadedDigest != "sha256:new" || !project.Pending() {
 		t.Fatalf("mixed baseline was treated as current: %#v", web)
@@ -392,7 +392,7 @@ func TestComposeCacheRejectsStaleRefreshRevision(t *testing.T) {
 	coordinator := newComposeUpdateCoordinator(nil)
 	pending := domain.ComposeUpdateProject{Name: "app", Services: map[string]domain.ComposeUpdateService{"web": {Reference: "app:latest", DownloadedDigest: "sha256:new"}}}
 	revision := coordinator.currentRevision()
-	if err := coordinator.put(domain.ComposeUpdateProject{Name: "app", Services: map[string]domain.ComposeUpdateService{}}); err != nil {
+	if err := coordinator.put(context.Background(), domain.ComposeUpdateProject{Name: "app", Services: map[string]domain.ComposeUpdateService{}}); err != nil {
 		t.Fatal(err)
 	}
 	coordinator.setCacheAtRevision("app", composeUpdateCache{project: pending, eligible: true}, revision)
@@ -437,14 +437,14 @@ func newFakeComposeUpdateStore() *fakeComposeUpdateStore {
 	return &fakeComposeUpdateStore{projects: make(map[string]domain.ComposeUpdateProject)}
 }
 
-func (store *fakeComposeUpdateStore) Get(project string) (domain.ComposeUpdateProject, bool) {
+func (store *fakeComposeUpdateStore) Get(_ context.Context, project string) (domain.ComposeUpdateProject, bool) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	value, found := store.projects[project]
 	return cloneComposeUpdateProject(value), found
 }
 
-func (store *fakeComposeUpdateStore) Put(project domain.ComposeUpdateProject) error {
+func (store *fakeComposeUpdateStore) Put(_ context.Context, project domain.ComposeUpdateProject) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.putCalls++
@@ -458,12 +458,12 @@ func (store *fakeComposeUpdateStore) Put(project domain.ComposeUpdateProject) er
 	return nil
 }
 
-func (store *fakeComposeUpdateStore) Health() error {
+func (store *fakeComposeUpdateStore) Health(context.Context) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	return store.err
 }
 
-func (store *fakeComposeUpdateStore) BeginMutation() (func(), error) {
+func (store *fakeComposeUpdateStore) BeginMutation(context.Context) (func(), error) {
 	return func() {}, nil
 }

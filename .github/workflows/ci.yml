@@ -4,7 +4,7 @@ on:
   pull_request:
   push:
     branches:
-      - main
+      - master
 
 jobs:
   go:
@@ -13,10 +13,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26.x'
           cache-dependency-path: |
@@ -24,7 +24,10 @@ jobs:
             libs/*/go.sum
 
       - name: Check format
-        run: test -z "$(gofmt -l apps libs)"
+        run: test -z "$(gofmt -l apps libs scripts/package-dtop.go)"
+
+      - name: Check release scripts
+        run: sh -n scripts/install-dtop.sh scripts/render-dtop-installer.sh scripts/test-install-dtop.sh
 
       - name: Test
         run: go test ./apps/dtop/... ./apps/ktop/... ./libs/tui/...

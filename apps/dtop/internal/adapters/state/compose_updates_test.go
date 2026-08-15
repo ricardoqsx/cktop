@@ -1,7 +1,9 @@
 package state
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,13 +38,35 @@ func TestDefaultComposeUpdatesPath(t *testing.T) {
 	})
 }
 
+func BenchmarkComposeUpdatesRead20Projects(b *testing.B) {
+	store, err := NewComposeUpdates(filepath.Join(b.TempDir(), "compose-updates.json"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	for index := range 20 {
+		project := completeProject(fmt.Sprintf("project-%02d", index))
+		if err := store.Put(context.Background(), project); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+	for range b.N {
+		for index := range 20 {
+			if _, ok := store.Get(context.Background(), fmt.Sprintf("project-%02d", index)); !ok {
+				b.Fatal("project disappeared during benchmark")
+			}
+		}
+	}
+}
+
 func TestComposeUpdatesMissingFileIsEnabledAndEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "compose-updates.json")
 	store, err := NewComposeUpdates(path)
 	if err != nil {
 		t.Fatalf("NewComposeUpdates() error = %v", err)
 	}
-	if _, ok := store.Get("missing"); ok {
+	if _, ok := store.Get(context.Background(), "missing"); ok {
 		t.Fatal("missing project was found")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -57,27 +81,27 @@ func TestComposeUpdatesRoundTripCopiesAndPreservesProjects(t *testing.T) {
 		t.Fatal(err)
 	}
 	project := completeProject("active")
-	if err := store.Put(project); err != nil {
+	if err := store.Put(context.Background(), project); err != nil {
 		t.Fatal(err)
 	}
 
 	project.Services["web"] = domain.ComposeUpdateService{Reference: "mutated:input"}
-	got, ok := store.Get("active")
+	got, ok := store.Get(context.Background(), "active")
 	if !ok || got.Services["web"].Reference != "registry.example/web:latest" {
 		t.Fatalf("Put retained caller map: %#v", got)
 	}
 	got.Services["web"] = domain.ComposeUpdateService{Reference: "mutated:output"}
-	again, _ := store.Get("active")
+	again, _ := store.Get(context.Background(), "active")
 	if again.Services["web"].Reference != "registry.example/web:latest" {
 		t.Fatalf("Get returned store map: %#v", again)
 	}
 
 	ineligible := completeProject("ineligible")
 	ineligible.Services["web"] = domain.ComposeUpdateService{Reference: "registry.example/old:latest"}
-	if err := store.Put(ineligible); err != nil {
+	if err := store.Put(context.Background(), ineligible); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(completeProject("active")); err != nil {
+	if err := store.Put(context.Background(), completeProject("active")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -86,11 +110,11 @@ func TestComposeUpdatesRoundTripCopiesAndPreservesProjects(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := completeProject("active")
-	got, ok = reopened.Get("active")
+	got, ok = reopened.Get(context.Background(), "active")
 	if !ok || !reflect.DeepEqual(got, want) {
 		t.Fatalf("round trip = %#v, want %#v", got, want)
 	}
-	preserved, ok := reopened.Get("ineligible")
+	preserved, ok := reopened.Get(context.Background(), "ineligible")
 	if !ok || preserved.Services["web"].Reference != "registry.example/old:latest" {
 		t.Fatalf("unrelated project was pruned: %#v", preserved)
 	}
@@ -109,19 +133,19 @@ func TestComposeUpdatesStoresReloadEachOthersMarkers(t *testing.T) {
 
 	project := completeProject("shared")
 	project.ConfigFingerprint = "written:first"
-	if err := first.Put(project); err != nil {
+	if err := first.Put(context.Background(), project); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := second.Get(project.Name)
+	got, ok := second.Get(context.Background(), project.Name)
 	if !ok || got.ConfigFingerprint != "written:first" {
 		t.Fatalf("second store did not reload first marker: %#v", got)
 	}
 
 	project.ConfigFingerprint = "written:second"
-	if err := second.Put(project); err != nil {
+	if err := second.Put(context.Background(), project); err != nil {
 		t.Fatal(err)
 	}
-	got, ok = first.Get(project.Name)
+	got, ok = first.Get(context.Background(), project.Name)
 	if !ok || got.ConfigFingerprint != "written:second" {
 		t.Fatalf("first store did not reload second marker: %#v", got)
 	}
@@ -138,20 +162,20 @@ func TestComposeUpdatesInterleavedPutMergesLatestDiskProjects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := first.Put(completeProject("first")); err != nil {
+	if err := first.Put(context.Background(), completeProject("first")); err != nil {
 		t.Fatal(err)
 	}
-	if err := second.Put(completeProject("second")); err != nil {
+	if err := second.Put(context.Background(), completeProject("second")); err != nil {
 		t.Fatal(err)
 	}
 	updated := completeProject("first")
 	updated.ConfigFingerprint = "updated:first"
-	if err := first.Put(updated); err != nil {
+	if err := first.Put(context.Background(), updated); err != nil {
 		t.Fatal(err)
 	}
 
 	for _, name := range []string{"first", "second"} {
-		if _, ok := second.Get(name); !ok {
+		if _, ok := second.Get(context.Background(), name); !ok {
 			t.Fatalf("project %q was erased by an interleaved Put", name)
 		}
 	}
@@ -168,27 +192,27 @@ func TestComposeUpdatesMutationScopeAllowsOwnerOperationsAndBlocksOtherStore(t *
 		t.Fatal(err)
 	}
 
-	releaseOwner, err := owner.BeginMutation()
+	releaseOwner, err := owner.BeginMutation(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer releaseOwner()
-	if _, err := owner.BeginMutation(); err == nil {
+	if _, err := owner.BeginMutation(context.Background()); err == nil {
 		t.Fatal("nested mutation on the same store succeeded")
 	}
 
 	ownerOperation := make(chan error, 1)
 	go func() {
 		project := completeProject("held")
-		if err := owner.Put(project); err != nil {
+		if err := owner.Put(context.Background(), project); err != nil {
 			ownerOperation <- err
 			return
 		}
-		if got, ok := owner.Get(project.Name); !ok || !reflect.DeepEqual(got, project) {
+		if got, ok := owner.Get(context.Background(), project.Name); !ok || !reflect.DeepEqual(got, project) {
 			ownerOperation <- fmt.Errorf("Get while held = %#v, found %t", got, ok)
 			return
 		}
-		ownerOperation <- owner.Health()
+		ownerOperation <- owner.Health(context.Background())
 	}()
 	select {
 	case err := <-ownerOperation:
@@ -207,7 +231,7 @@ func TestComposeUpdatesMutationScopeAllowsOwnerOperationsAndBlocksOtherStore(t *
 	waiterResult := make(chan mutationResult, 1)
 	go func() {
 		close(waiterStarted)
-		release, err := waiter.BeginMutation()
+		release, err := waiter.BeginMutation(context.Background())
 		waiterResult <- mutationResult{release: release, err: err}
 	}()
 	<-waiterStarted
@@ -227,7 +251,7 @@ func TestComposeUpdatesMutationScopeAllowsOwnerOperationsAndBlocksOtherStore(t *
 			t.Fatal(result.err)
 		}
 		defer result.release()
-		if _, ok := waiter.Get("held"); !ok {
+		if _, ok := waiter.Get(context.Background(), "held"); !ok {
 			t.Fatal("waiting store did not reload mutation state while holding lock")
 		}
 	case <-time.After(2 * time.Second):
@@ -240,19 +264,51 @@ func TestComposeUpdatesMutationReleaseIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	release, err := store.BeginMutation()
+	release, err := store.BeginMutation(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	release()
 	release()
 
-	nextRelease, err := store.BeginMutation()
+	nextRelease, err := store.BeginMutation(context.Background())
 	if err != nil {
 		t.Fatalf("BeginMutation() after repeated release = %v", err)
 	}
 	release()
 	nextRelease()
+}
+
+func TestComposeUpdatesMutationWaitHonorsContextAndRemainsUsable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "compose-updates.json")
+	owner, err := NewComposeUpdates(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiter, err := NewComposeUpdates(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	release, err := owner.BeginMutation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	if _, err := waiter.BeginMutation(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("BeginMutation() error = %v, want deadline exceeded", err)
+	}
+	release()
+
+	nextRelease, err := waiter.BeginMutation(context.Background())
+	if err != nil {
+		t.Fatalf("BeginMutation() after contention = %v", err)
+	}
+	nextRelease()
+	if err := waiter.Health(context.Background()); err != nil {
+		t.Fatalf("Health() after contention = %v", err)
+	}
 }
 
 func TestComposeUpdatesReloadNoticesMalformedReplacementAndDisablesWrites(t *testing.T) {
@@ -261,7 +317,7 @@ func TestComposeUpdatesReloadNoticesMalformedReplacementAndDisablesWrites(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := getStore.Put(completeProject("existing")); err != nil {
+	if err := getStore.Put(context.Background(), completeProject("existing")); err != nil {
 		t.Fatal(err)
 	}
 	healthStore, err := NewComposeUpdates(path)
@@ -273,13 +329,13 @@ func TestComposeUpdatesReloadNoticesMalformedReplacementAndDisablesWrites(t *tes
 	if err := os.WriteFile(path, malformed, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := getStore.Get("existing"); ok {
+	if _, ok := getStore.Get(context.Background(), "existing"); ok {
 		t.Fatal("Get returned stale state after malformed replacement")
 	}
-	if err := healthStore.Health(); err == nil {
+	if err := healthStore.Health(context.Background()); err == nil {
 		t.Fatal("Health did not report malformed replacement")
 	}
-	if err := getStore.Put(completeProject("blocked")); err == nil {
+	if err := getStore.Put(context.Background(), completeProject("blocked")); err == nil {
 		t.Fatal("Put succeeded after malformed replacement")
 	}
 	after, err := os.ReadFile(path)
@@ -297,7 +353,7 @@ func TestComposeUpdatesJSONContainsFingerprintAndServiceFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(completeProject("media")); err != nil {
+	if err := store.Put(context.Background(), completeProject("media")); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
@@ -342,7 +398,7 @@ func TestComposeUpdatesMalformedAndFutureFilesDisableWritesAndRemainUntouched(t 
 			if store == nil || err == nil {
 				t.Fatalf("store = %#v, error = %v", store, err)
 			}
-			if err := store.Put(completeProject("blocked")); err == nil {
+			if err := store.Put(context.Background(), completeProject("blocked")); err == nil {
 				t.Fatal("Put succeeded on disabled store")
 			}
 			after, err := os.ReadFile(path)
@@ -374,7 +430,7 @@ func TestComposeUpdatesInvalidDataDisablesStore(t *testing.T) {
 			if store == nil || err == nil {
 				t.Fatalf("store = %#v, error = %v", store, err)
 			}
-			if err := store.Put(completeProject("blocked")); err == nil {
+			if err := store.Put(context.Background(), completeProject("blocked")); err == nil {
 				t.Fatal("Put succeeded on disabled store")
 			}
 			after, err := os.ReadFile(path)
@@ -394,7 +450,7 @@ func TestComposeUpdatesPutRejectsInvalidProjectWithoutChangingFile(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(completeProject("valid")); err != nil {
+	if err := store.Put(context.Background(), completeProject("valid")); err != nil {
 		t.Fatal(err)
 	}
 	original, err := os.ReadFile(path)
@@ -403,7 +459,7 @@ func TestComposeUpdatesPutRejectsInvalidProjectWithoutChangingFile(t *testing.T)
 	}
 	invalid := completeProject("invalid")
 	invalid.Services["web"] = domain.ComposeUpdateService{Reference: "image:tag", AppliedDigest: "missing-colon"}
-	if err := store.Put(invalid); err == nil {
+	if err := store.Put(context.Background(), invalid); err == nil {
 		t.Fatal("invalid Put succeeded")
 	}
 	after, err := os.ReadFile(path)
@@ -426,7 +482,7 @@ func TestComposeUpdatesPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(completeProject("project")); err != nil {
+	if err := store.Put(context.Background(), completeProject("project")); err != nil {
 		t.Fatal(err)
 	}
 	assertPermissions(t, directory, 0o700)

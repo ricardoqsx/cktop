@@ -13,12 +13,26 @@ import (
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/config"
 	"github.com/ricardoqsx/cktop/apps/dtop/internal/i18n"
 	dtoptui "github.com/ricardoqsx/cktop/apps/dtop/internal/presentation/tui"
+	"github.com/ricardoqsx/cktop/apps/dtop/internal/sanitize"
 )
 
 func main() {
-	settings, err := config.Load()
+	options, err := parseCLI(os.Args[1:], os.Stdout)
+	if isHelp(err) {
+		return
+	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dtop: %v\n", err)
+		fmt.Fprintf(os.Stderr, "dtop: %s\n", sanitize.TerminalLine(err.Error()))
+		os.Exit(2)
+	}
+	if options.version {
+		fmt.Fprintln(os.Stdout, versionText())
+		return
+	}
+
+	settings, err := config.LoadWithPath(options.configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dtop: %s\n", sanitize.TerminalLine(err.Error()))
 		os.Exit(1)
 	}
 
@@ -39,7 +53,7 @@ func main() {
 
 	_, err = tea.NewProgram(model, tea.WithAltScreen()).Run()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dtop: %v\n", err)
+		fmt.Fprintf(os.Stderr, "dtop: %s\n", sanitize.TerminalLine(err.Error()))
 		os.Exit(1)
 	}
 }

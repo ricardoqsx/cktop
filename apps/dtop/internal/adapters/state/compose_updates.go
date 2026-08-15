@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,7 +73,7 @@ func NewComposeUpdates(path string) (*ComposeUpdates, error) {
 	return store, nil
 }
 
-func (s *ComposeUpdates) Get(project string) (domain.ComposeUpdateProject, bool) {
+func (s *ComposeUpdates) Get(ctx context.Context, project string) (domain.ComposeUpdateProject, bool) {
 	if s == nil {
 		return domain.ComposeUpdateProject{}, false
 	}
@@ -81,9 +82,8 @@ func (s *ComposeUpdates) Get(project string) (domain.ComposeUpdateProject, bool)
 	if s.path == "" {
 		return domain.ComposeUpdateProject{}, false
 	}
-	release, err := s.lockForOperation()
+	release, err := s.lockForOperation(ctx)
 	if err != nil {
-		s.disable(fmt.Errorf("lock compose updates: %w", err))
 		return domain.ComposeUpdateProject{}, false
 	}
 	defer release()
@@ -98,7 +98,7 @@ func (s *ComposeUpdates) Get(project string) (domain.ComposeUpdateProject, bool)
 	return cloneProject(value), true
 }
 
-func (s *ComposeUpdates) Put(project domain.ComposeUpdateProject) error {
+func (s *ComposeUpdates) Put(ctx context.Context, project domain.ComposeUpdateProject) error {
 	if s == nil {
 		return errors.New("compose updates store is nil")
 	}
@@ -107,10 +107,9 @@ func (s *ComposeUpdates) Put(project domain.ComposeUpdateProject) error {
 	if s.path == "" {
 		return fmt.Errorf("compose updates store is disabled: %w", s.disabled)
 	}
-	release, err := s.lockForOperation()
+	release, err := s.lockForOperation(ctx)
 	if err != nil {
-		s.disable(fmt.Errorf("lock compose updates: %w", err))
-		return fmt.Errorf("compose updates store is disabled: %w", s.disabled)
+		return fmt.Errorf("lock compose updates: %w", err)
 	}
 	defer release()
 	if err := s.reloadFromDisk(); err != nil {
@@ -139,7 +138,7 @@ func (s *ComposeUpdates) Put(project domain.ComposeUpdateProject) error {
 	return nil
 }
 
-func (s *ComposeUpdates) Health() error {
+func (s *ComposeUpdates) Health(ctx context.Context) error {
 	if s == nil {
 		return errors.New("compose updates store is nil")
 	}
@@ -148,10 +147,9 @@ func (s *ComposeUpdates) Health() error {
 	if s.path == "" {
 		return s.disabled
 	}
-	release, err := s.lockForOperation()
+	release, err := s.lockForOperation(ctx)
 	if err != nil {
-		s.disable(fmt.Errorf("lock compose updates: %w", err))
-		return s.disabled
+		return fmt.Errorf("lock compose updates: %w", err)
 	}
 	defer release()
 	if err := s.reloadFromDisk(); err != nil {
@@ -160,7 +158,7 @@ func (s *ComposeUpdates) Health() error {
 	return s.disabled
 }
 
-func (s *ComposeUpdates) BeginMutation() (func(), error) {
+func (s *ComposeUpdates) BeginMutation(ctx context.Context) (func(), error) {
 	if s == nil {
 		return nil, errors.New("compose updates store is nil")
 	}
@@ -173,10 +171,9 @@ func (s *ComposeUpdates) BeginMutation() (func(), error) {
 		return nil, errors.New("compose updates mutation is already in progress")
 	}
 
-	release, err := acquireInterprocessLock(s.path)
+	release, err := acquireInterprocessLock(ctx, s.path)
 	if err != nil {
-		s.disable(fmt.Errorf("lock compose updates: %w", err))
-		return nil, fmt.Errorf("compose updates store is disabled: %w", s.disabled)
+		return nil, fmt.Errorf("lock compose updates: %w", err)
 	}
 	if err := s.reloadFromDisk(); err != nil {
 		release()
@@ -204,11 +201,11 @@ func (s *ComposeUpdates) BeginMutation() (func(), error) {
 }
 
 // lockForOperation is called with s.mu held, so mutation release cannot race it.
-func (s *ComposeUpdates) lockForOperation() (func(), error) {
+func (s *ComposeUpdates) lockForOperation(ctx context.Context) (func(), error) {
 	if s.mutationUnlock != nil {
 		return func() {}, nil
 	}
-	return acquireInterprocessLock(s.path)
+	return acquireInterprocessLock(ctx, s.path)
 }
 
 func (s *ComposeUpdates) reloadFromDisk() error {
@@ -408,7 +405,7 @@ func replaceFile(path string, data []byte) error {
 	return nil
 }
 
-func acquireInterprocessLock(path string) (func(), error) {
+func acquireInterprocessLock(ctx context.Context, path string) (func(), error) {
 	directory := filepath.Dir(path)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return nil, fmt.Errorf("create compose updates directory: %w", err)
@@ -421,7 +418,7 @@ func acquireInterprocessLock(path string) (func(), error) {
 		_ = file.Close()
 		return nil, fmt.Errorf("set compose updates lock permissions: %w", err)
 	}
-	unlock, err := lockFile(file)
+	unlock, err := lockFile(ctx, file)
 	if err != nil {
 		_ = file.Close()
 		return nil, err

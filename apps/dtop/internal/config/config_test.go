@@ -64,6 +64,58 @@ func TestLoadPathsAppliesUserOverride(t *testing.T) {
 	}
 }
 
+func TestLoadPathsAppliesAllSourcesInPriorityOrder(t *testing.T) {
+	dir := t.TempDir()
+	system := filepath.Join(dir, "system.conf")
+	user := filepath.Join(dir, "user.conf")
+	environment := filepath.Join(dir, "environment.conf")
+	explicit := filepath.Join(dir, "explicit.conf")
+	writeConfig(t, system, "[display]\nmemory_mode = usage\naccent_color = 1\n")
+	writeConfig(t, user, "[display]\nmemory_mode = percent\naccent_color = 2\n")
+	writeConfig(t, environment, "[display]\nmemory_mode = both\naccent_color = 3\n")
+	writeConfig(t, explicit, "[display]\naccent_color = 4\n")
+
+	loaded, err := LoadPaths(Paths{System: system, User: user, Environment: environment, Explicit: explicit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Display.MemoryMode != MemoryBoth || loaded.Display.AccentColor != "4" {
+		t.Fatalf("unexpected merged display config: %#v", loaded.Display)
+	}
+}
+
+func TestLoadPathsRequiresDeclaredOverrides(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.conf")
+	for name, paths := range map[string]Paths{
+		"environment": {Environment: missing},
+		"explicit":    {Explicit: missing},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadPaths(paths); err == nil || !strings.Contains(err.Error(), "does not exist") {
+				t.Fatalf("LoadPaths() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadWithPathUsesEnvironmentThenExplicitOverride(t *testing.T) {
+	dir := t.TempDir()
+	environment := filepath.Join(dir, "environment.conf")
+	explicit := filepath.Join(dir, "explicit.conf")
+	writeConfig(t, environment, "[display]\naccent_color = 10\nfocus_color = 20\n")
+	writeConfig(t, explicit, "[display]\naccent_color = 30\n")
+	t.Setenv("DTOP_CONFIG", environment)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+
+	loaded, err := LoadWithPath(explicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Display.AccentColor != "30" || loaded.Display.FocusColor != "20" {
+		t.Fatalf("unexpected environment/explicit merge: %#v", loaded.Display)
+	}
+}
+
 func TestLoadPathsReportsFileAndLine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dtop.conf")
 	writeConfig(t, path, "[display]\nmemory_mode = unknown\n")

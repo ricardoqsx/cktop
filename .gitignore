@@ -7,6 +7,12 @@
 *.dll
 *.so
 *.dylib
+/dtop
+/ktop
+/apps/dtop/dtop
+/apps/ktop/ktop
+/dist/
+/dtop.minisign.key
 
 # Test binary, built with `go test -c`
 *.test

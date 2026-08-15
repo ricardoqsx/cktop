@@ -108,6 +108,15 @@ func TestBoundedOutputRejectsOversizedData(t *testing.T) {
 	}
 }
 
+func TestLimitedOutputSanitizesTerminalControls(t *testing.T) {
+	var output limitedOutput
+	_, _ = output.Write([]byte("failure\x1b]52;c;secret\a\x1b[31m\u009b2J"))
+	got := output.String()
+	if strings.ContainsAny(got, "\x1b\a\u009b") {
+		t.Fatalf("limitedOutput contains terminal controls: %q", got)
+	}
+}
+
 func TestComposeConfigRejectsRemoteEndpoint(t *testing.T) {
 	runtime := NewRuntime(ResolverOptions{Spec: ConnectionSpec{Host: "ssh://docker@example.test"}})
 	stack := domain.Stack{Name: "app", WorkingDir: "/srv/app", Files: []string{"/srv/app/compose.yaml"}}
